@@ -46,6 +46,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer service.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	log.Printf("github bootstrap started")

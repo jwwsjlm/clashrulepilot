@@ -74,6 +74,7 @@ func New(cfg config.Config) (*Service, error) {
 	return &Service{cfg: cfg, repo: repo, upstream: syncer.New(cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), index: ruleindex.New(cfg.UpstreamIndex, cfg.DataDir, cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), lookup: lookup.New(cfg.GeoIPAPIURL)}, nil
 }
 func (s *Service) Ready() bool                   { s.mu.Lock(); defer s.mu.Unlock(); return s.ready }
+func (s *Service) Close() error                  { return s.index.Close() }
 func (s *Service) SyncEnabled() bool             { return s.cfg.SyncUpstream }
 func (s *Service) IndexEnabled() bool            { return s.cfg.UpstreamIndex }
 func (s *Service) RepoWebURL() string            { return s.repo.WebURL() }

@@ -1,7 +1,6 @@
 package ruleindex
 
 import (
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,12 +14,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-yaml"
 	gh "github.com/google/go-github/v81/github"
 	"github.com/hashicorp/go-retryablehttp"
+	bolt "go.etcd.io/bbolt"
 )
 
 type Action string
@@ -46,11 +45,14 @@ type sourceMeta struct {
 	SHA256       string `json:"sha256"`
 }
 
-type diskSnapshot struct {
+type diskMetadata struct {
 	Version   int                   `json:"version"`
 	UpdatedAt time.Time             `json:"updated_at"`
-	Entries   []Entry               `json:"entries"`
 	Sources   map[string]sourceMeta `json:"sources"`
+	Direct    int                   `json:"direct"`
+	Proxy     int                   `json:"proxy"`
+	Category  int                   `json:"category"`
+	GeoSite   int                   `json:"geosite"`
 }
 
 type Status struct {
@@ -78,22 +80,12 @@ type Manager struct {
 	geositeURL   string
 	http         *http.Client
 	github       *gh.Client
-	current      atomic.Pointer[compiled]
-	mu           sync.Mutex
+	syncMu       sync.Mutex
+	dbMu         sync.RWMutex
+	db           *bolt.DB
+	metadata     diskMetadata
 	statusMu     sync.RWMutex
 	status       Status
-}
-
-type compiled struct {
-	snapshot diskSnapshot
-	exact    map[string][]Entry
-	suffix   *trieNode
-	keywords []Entry
-}
-
-type trieNode struct {
-	children map[string]*trieNode
-	entries  []Entry
 }
 
 type source struct {
@@ -101,6 +93,14 @@ type source struct {
 	action               Action
 	domainBehavior       bool
 }
+
+var (
+	bucketExact    = []byte("exact")
+	bucketSuffix   = []byte("suffix")
+	bucketKeyword  = []byte("keyword")
+	bucketMetadata = []byte("metadata")
+	metadataKey    = []byte("snapshot")
+)
 
 func New(enabled bool, dataDir, repo, branch, token string) *Manager {
 	retry := retryablehttp.NewClient()
@@ -114,7 +114,11 @@ func New(enabled bool, dataDir, repo, branch, token string) *Manager {
 	if strings.TrimSpace(token) != "" {
 		githubClient = githubClient.WithAuthToken(token)
 	}
-	m := &Manager{enabled: enabled, dataDir: dataDir, upstreamRepo: repo, branch: branch, geositeURL: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/classical/cn.yaml", http: httpClient, github: githubClient}
+	m := &Manager{
+		enabled: enabled, dataDir: dataDir, upstreamRepo: repo, branch: branch,
+		geositeURL: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/classical/cn.yaml",
+		http:       httpClient, github: githubClient,
+	}
 	m.status.Enabled = enabled
 	return m
 }
@@ -123,162 +127,199 @@ func (m *Manager) Load() error {
 	if !m.enabled {
 		return nil
 	}
-	m.cleanupTemporarySnapshots()
-	f, err := os.Open(m.snapshotPath())
+	m.cleanupTemporaryFiles()
+	m.removeLegacySnapshots()
+	db, metadata, err := openReadDatabase(m.databasePath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	defer f.Close()
-	zr, err := gzip.NewReader(f)
-	if err != nil {
-		return err
-	}
-	defer zr.Close()
-	var snap diskSnapshot
-	if err := json.NewDecoder(io.LimitReader(zr, 64<<20)).Decode(&snap); err != nil {
-		return err
-	}
-	m.install(snap)
+	m.dbMu.Lock()
+	m.db = db
+	m.metadata = metadata
+	m.dbMu.Unlock()
+	m.installStatus(metadata)
 	return nil
+}
+
+func (m *Manager) Close() error {
+	m.dbMu.Lock()
+	defer m.dbMu.Unlock()
+	if m.db == nil {
+		return nil
+	}
+	err := m.db.Close()
+	m.db = nil
+	return err
 }
 
 func (m *Manager) Sync(ctx context.Context) (bool, error) {
 	if !m.enabled {
 		return false, nil
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
 
-	old := diskSnapshot{Version: 2, Sources: map[string]sourceMeta{}}
-	if c := m.current.Load(); c != nil {
-		old = c.snapshot
+	m.dbMu.RLock()
+	old := m.metadata
+	hadDatabase := m.db != nil
+	m.dbMu.RUnlock()
+	if old.Sources == nil {
+		old.Sources = map[string]sourceMeta{}
 	}
-	oldEntries := make(map[string][]Entry, len(old.Sources))
-	for _, e := range old.Entries {
-		oldEntries[e.Source] = append(oldEntries[e.Source], e)
-	}
-
 	sources, err := m.discoverSources(ctx)
 	if err != nil {
 		m.setError(err)
 		return false, err
 	}
-	entries := make([]Entry, 0, len(old.Entries))
+	if err := os.MkdirAll(m.dataDir, 0o755); err != nil {
+		m.setError(err)
+		return false, err
+	}
+	m.cleanupTemporaryFiles()
+	stageDir := m.stagingSourceDir()
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		m.setError(err)
+		return false, err
+	}
+	defer os.RemoveAll(stageDir)
+
 	metas := make(map[string]sourceMeta, len(sources))
+	missingLocalSource := false
 	for _, src := range sources {
 		oldMeta := old.Sources[src.name]
-		if src.remoteSHA != "" && src.remoteSHA == oldMeta.RemoteSHA && len(oldEntries[src.name]) > 0 {
-			entries = append(entries, oldEntries[src.name]...)
+		currentFile := filepath.Join(m.sourceDir(), filepath.Base(src.name))
+		stageFile := filepath.Join(stageDir, filepath.Base(src.name))
+		hasCurrentFile := fileExists(currentFile)
+		if src.remoteSHA != "" && src.remoteSHA == oldMeta.RemoteSHA && hasCurrentFile {
+			if err := copyFile(currentFile, stageFile); err != nil {
+				m.setError(err)
+				return false, err
+			}
 			metas[src.name] = oldMeta
 			continue
 		}
-		body, meta, notModified, fetchErr := m.fetch(ctx, src.url, oldMeta)
+		requestMeta := oldMeta
+		if !hasCurrentFile {
+			missingLocalSource = true
+			requestMeta = sourceMeta{}
+		}
+		body, meta, notModified, fetchErr := m.fetch(ctx, src.url, requestMeta)
 		if fetchErr != nil {
 			err = fmt.Errorf("sync %s: %w", src.name, fetchErr)
 			m.setError(err)
 			return false, err
 		}
 		if notModified {
-			if len(oldEntries[src.name]) == 0 {
-				err = fmt.Errorf("sync %s: server returned not modified but no local entries exist", src.name)
+			if !fileExists(currentFile) {
+				err = fmt.Errorf("sync %s: server returned not modified but local source file is missing", src.name)
 				m.setError(err)
 				return false, err
 			}
-			entries = append(entries, oldEntries[src.name]...)
+			if err := copyFile(currentFile, stageFile); err != nil {
+				m.setError(err)
+				return false, err
+			}
 			metas[src.name] = oldMeta
 			continue
 		}
 		meta.RemoteSHA = src.remoteSHA
-		var parsed []Entry
-		if src.domainBehavior {
-			parsed, err = parseDomainBehavior(body, src.action, src.name)
-		} else {
-			parsed, err = parseClassical(body, src.action, src.name)
-		}
-		if err != nil {
-			err = fmt.Errorf("parse %s: %w", src.name, err)
+		if err := os.WriteFile(stageFile, body, 0o644); err != nil {
 			m.setError(err)
 			return false, err
 		}
-		entries = append(entries, parsed...)
 		metas[src.name] = meta
 	}
-	if len(entries) == 0 {
-		err = fmt.Errorf("no upstream domain index data available")
-		m.setError(err)
-		return false, err
-	}
-	sortEntries(entries)
-	if m.current.Load() != nil && reflect.DeepEqual(old.Entries, entries) && reflect.DeepEqual(old.Sources, metas) {
+
+	changed := !hadDatabase || missingLocalSource || !reflect.DeepEqual(old.Sources, metas)
+	if !changed {
 		m.setError(nil)
 		return false, nil
 	}
-	snap := diskSnapshot{Version: 2, UpdatedAt: time.Now().UTC(), Entries: entries, Sources: metas}
-	if err := m.persist(snap); err != nil {
+	metadata := diskMetadata{Version: 3, UpdatedAt: time.Now().UTC(), Sources: metas}
+	tmpDatabase := m.databasePath() + ".tmp"
+	metadata, err = buildDatabase(tmpDatabase, stageDir, sources, metadata)
+	if err != nil {
 		m.setError(err)
 		return false, err
 	}
-	m.install(snap)
+	if err := replaceDirectory(stageDir, m.sourceDir()); err != nil {
+		_ = os.Remove(tmpDatabase)
+		m.setError(err)
+		return false, err
+	}
+	if err := m.replaceDatabase(tmpDatabase, metadata); err != nil {
+		m.setError(err)
+		return false, err
+	}
+	m.removeLegacySnapshots()
+	m.installStatus(metadata)
 	m.setError(nil)
 	return true, nil
 }
 
 func (m *Manager) Query(domain string) []Match {
-	c := m.current.Load()
-	if c == nil {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" {
 		return nil
 	}
-	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	m.dbMu.RLock()
+	defer m.dbMu.RUnlock()
+	if m.db == nil {
+		return nil
+	}
 	seen := map[string]bool{}
 	var out []Match
-	add := func(e Entry) {
-		key := string(e.Action) + "\x00" + e.Kind + "\x00" + e.Pattern + "\x00" + e.Source
-		if seen[key] {
-			return
+	addEncoded := func(data []byte) error {
+		if len(data) == 0 {
+			return nil
 		}
-		seen[key] = true
-		out = append(out, Match{Kind: e.Kind, Pattern: e.Pattern, Action: e.Action, Source: e.Source})
+		var entries []Entry
+		if err := json.Unmarshal(data, &entries); err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			key := string(entry.Action) + "\x00" + entry.Kind + "\x00" + entry.Pattern + "\x00" + entry.Source
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, Match{Kind: entry.Kind, Pattern: entry.Pattern, Action: entry.Action, Source: entry.Source})
+		}
+		return nil
 	}
-	for _, e := range c.exact[domain] {
-		add(e)
-	}
-	node := c.suffix
-	labels := strings.Split(domain, ".")
-	for i := len(labels) - 1; i >= 0 && node != nil; i-- {
-		node = node.children[labels[i]]
-		if node != nil {
-			for _, e := range node.entries {
-				add(e)
+	_ = m.db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(bucketExact); b != nil {
+			if err := addEncoded(b.Get([]byte(domain))); err != nil {
+				return err
 			}
 		}
-	}
-	for _, e := range c.keywords {
-		if strings.Contains(domain, e.Pattern) {
-			add(e)
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		priority := func(k string) int {
-			switch k {
-			case "DOMAIN":
-				return 0
-			case "DOMAIN-SUFFIX":
-				return 1
-			default:
-				return 2
+		if b := tx.Bucket(bucketSuffix); b != nil {
+			candidate := domain
+			for {
+				if err := addEncoded(b.Get([]byte(candidate))); err != nil {
+					return err
+				}
+				dot := strings.IndexByte(candidate, '.')
+				if dot < 0 {
+					break
+				}
+				candidate = candidate[dot+1:]
 			}
 		}
-		if priority(out[i].Kind) != priority(out[j].Kind) {
-			return priority(out[i].Kind) < priority(out[j].Kind)
+		if b := tx.Bucket(bucketKeyword); b != nil {
+			return b.ForEach(func(key, value []byte) error {
+				if strings.Contains(domain, string(key)) {
+					return addEncoded(value)
+				}
+				return nil
+			})
 		}
-		if len(out[i].Pattern) != len(out[j].Pattern) {
-			return len(out[i].Pattern) > len(out[j].Pattern)
-		}
-		return out[i].Source < out[j].Source
+		return nil
 	})
+	sortMatches(out)
 	return out
 }
 
@@ -318,9 +359,7 @@ func (m *Manager) discoverSources(ctx context.Context) ([]source, error) {
 	if len(sources) == 0 {
 		return nil, fmt.Errorf("no *_Domain.yaml files found in upstream rule directory")
 	}
-	sources = append(sources, source{
-		name: "GEOSITE_CN.yaml", url: m.geositeURL, action: GeoSite,
-	})
+	sources = append(sources, source{name: "GEOSITE_CN.yaml", url: m.geositeURL, action: GeoSite})
 	sort.Slice(sources, func(i, j int) bool { return sources[i].name < sources[j].name })
 	return sources, nil
 }
@@ -355,6 +394,171 @@ func (m *Manager) fetch(ctx context.Context, endpoint string, old sourceMeta) ([
 	}
 	sum := sha256.Sum256(b)
 	return b, sourceMeta{ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified"), SHA256: hex.EncodeToString(sum[:])}, false, nil
+}
+
+func buildDatabase(path, sourceDir string, sources []source, metadata diskMetadata) (diskMetadata, error) {
+	_ = os.Remove(path)
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 2 * time.Second})
+	if err != nil {
+		return metadata, err
+	}
+	defer db.Close()
+	if err := db.Update(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{bucketExact, bucketSuffix, bucketKeyword, bucketMetadata} {
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return metadata, err
+	}
+	for _, src := range sources {
+		data, err := os.ReadFile(filepath.Join(sourceDir, filepath.Base(src.name)))
+		if err != nil {
+			return metadata, fmt.Errorf("read staged source %s: %w", src.name, err)
+		}
+		var entries []Entry
+		if src.domainBehavior {
+			entries, err = parseDomainBehavior(data, src.action, src.name)
+		} else {
+			entries, err = parseClassical(data, src.action, src.name)
+		}
+		if err != nil {
+			return metadata, fmt.Errorf("parse %s: %w", src.name, err)
+		}
+		if err := db.Update(func(tx *bolt.Tx) error { return storeEntries(tx, entries) }); err != nil {
+			return metadata, fmt.Errorf("index %s: %w", src.name, err)
+		}
+		for _, entry := range entries {
+			switch entry.Action {
+			case Direct:
+				metadata.Direct++
+			case Proxy:
+				metadata.Proxy++
+			case Category:
+				metadata.Category++
+			case GeoSite:
+				metadata.GeoSite++
+			}
+		}
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return metadata, err
+	}
+	if err := db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketMetadata).Put(metadataKey, encoded) }); err != nil {
+		return metadata, err
+	}
+	if err := db.Sync(); err != nil {
+		return metadata, err
+	}
+	return metadata, nil
+}
+
+func storeEntries(tx *bolt.Tx, entries []Entry) error {
+	for _, entry := range entries {
+		var bucketName []byte
+		switch entry.Kind {
+		case "DOMAIN":
+			bucketName = bucketExact
+		case "DOMAIN-SUFFIX":
+			bucketName = bucketSuffix
+		case "DOMAIN-KEYWORD":
+			bucketName = bucketKeyword
+		default:
+			continue
+		}
+		bucket := tx.Bucket(bucketName)
+		key := []byte(entry.Pattern)
+		var existing []Entry
+		if value := bucket.Get(key); len(value) > 0 {
+			if err := json.Unmarshal(value, &existing); err != nil {
+				return err
+			}
+		}
+		existing = append(existing, entry)
+		encoded, err := json.Marshal(existing)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put(key, encoded); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func openReadDatabase(path string) (*bolt.DB, diskMetadata, error) {
+	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true, Timeout: 2 * time.Second})
+	if err != nil {
+		return nil, diskMetadata{}, err
+	}
+	var metadata diskMetadata
+	if err := db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketMetadata)
+		if bucket == nil || len(bucket.Get(metadataKey)) == 0 {
+			return fmt.Errorf("index metadata is missing")
+		}
+		return json.Unmarshal(bucket.Get(metadataKey), &metadata)
+	}); err != nil {
+		_ = db.Close()
+		return nil, diskMetadata{}, err
+	}
+	return db, metadata, nil
+}
+
+func (m *Manager) replaceDatabase(tmp string, metadata diskMetadata) error {
+	m.dbMu.Lock()
+	defer m.dbMu.Unlock()
+	if m.db != nil {
+		if err := m.db.Close(); err != nil {
+			return err
+		}
+		m.db = nil
+	}
+	target := m.databasePath()
+	backup := target + ".prev"
+	_ = os.Remove(backup)
+	if fileExists(target) {
+		if err := os.Rename(target, backup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Rename(backup, target)
+		return err
+	}
+	db, loadedMetadata, err := openReadDatabase(target)
+	if err != nil {
+		_ = os.Remove(target)
+		_ = os.Rename(backup, target)
+		if restored, restoredMetadata, restoreErr := openReadDatabase(target); restoreErr == nil {
+			m.db = restored
+			m.metadata = restoredMetadata
+		}
+		return err
+	}
+	m.db = db
+	m.metadata = loadedMetadata
+	_ = os.Remove(backup)
+	return nil
+}
+
+func replaceDirectory(stage, target string) error {
+	backup := target + ".prev"
+	_ = os.RemoveAll(backup)
+	if fileExists(target) {
+		if err := os.Rename(target, backup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(stage, target); err != nil {
+		_ = os.Rename(backup, target)
+		return err
+	}
+	_ = os.RemoveAll(backup)
+	return nil
 }
 
 func parseClassical(data []byte, action Action, source string) ([]Entry, error) {
@@ -439,109 +643,38 @@ func appendUnique(out *[]Entry, seen map[string]bool, entry Entry) {
 	*out = append(*out, entry)
 }
 
-func sortEntries(entries []Entry) {
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Source != entries[j].Source {
-			return entries[i].Source < entries[j].Source
+func sortMatches(out []Match) {
+	sort.SliceStable(out, func(i, j int) bool {
+		priority := func(k string) int {
+			switch k {
+			case "DOMAIN":
+				return 0
+			case "DOMAIN-SUFFIX":
+				return 1
+			default:
+				return 2
+			}
 		}
-		if entries[i].Kind != entries[j].Kind {
-			return entries[i].Kind < entries[j].Kind
+		if priority(out[i].Kind) != priority(out[j].Kind) {
+			return priority(out[i].Kind) < priority(out[j].Kind)
 		}
-		return entries[i].Pattern < entries[j].Pattern
+		if len(out[i].Pattern) != len(out[j].Pattern) {
+			return len(out[i].Pattern) > len(out[j].Pattern)
+		}
+		return out[i].Source < out[j].Source
 	})
 }
 
-func compile(s diskSnapshot) *compiled {
-	c := &compiled{snapshot: s, exact: map[string][]Entry{}, suffix: &trieNode{children: map[string]*trieNode{}}}
-	for _, e := range s.Entries {
-		switch e.Kind {
-		case "DOMAIN":
-			c.exact[e.Pattern] = append(c.exact[e.Pattern], e)
-		case "DOMAIN-SUFFIX":
-			node := c.suffix
-			parts := strings.Split(e.Pattern, ".")
-			for i := len(parts) - 1; i >= 0; i-- {
-				if node.children[parts[i]] == nil {
-					node.children[parts[i]] = &trieNode{children: map[string]*trieNode{}}
-				}
-				node = node.children[parts[i]]
-			}
-			node.entries = append(node.entries, e)
-		case "DOMAIN-KEYWORD":
-			c.keywords = append(c.keywords, e)
-		}
-	}
-	return c
-}
-
-func (m *Manager) install(s diskSnapshot) {
-	m.current.Store(compile(s))
-	status := Status{Enabled: m.enabled, Loaded: true, UpdatedAt: s.UpdatedAt, Sources: len(s.Sources)}
-	for _, e := range s.Entries {
-		switch e.Action {
-		case Direct:
-			status.Direct++
-		case Proxy:
-			status.Proxy++
-		case Category:
-			status.Category++
-		case GeoSite:
-			status.GeoSite++
-		}
+func (m *Manager) installStatus(metadata diskMetadata) {
+	status := Status{
+		Enabled: true, Loaded: true, UpdatedAt: metadata.UpdatedAt, Sources: len(metadata.Sources),
+		Direct: metadata.Direct, Proxy: metadata.Proxy, Category: metadata.Category, GeoSite: metadata.GeoSite,
 	}
 	m.statusMu.Lock()
 	status.LastError = m.status.LastError
 	m.status = status
 	m.statusMu.Unlock()
 }
-
-func (m *Manager) persist(s diskSnapshot) error {
-	if err := os.MkdirAll(m.dataDir, 0o755); err != nil {
-		return err
-	}
-	m.cleanupTemporarySnapshots()
-	tmp := m.snapshotPath() + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	z := gzip.NewWriter(f)
-	err = json.NewEncoder(z).Encode(s)
-	if closeErr := z.Close(); err == nil {
-		err = closeErr
-	}
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, m.snapshotPath()); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	m.cleanupTemporarySnapshots()
-	return nil
-}
-
-func (m *Manager) cleanupTemporarySnapshots() {
-	if strings.TrimSpace(m.dataDir) == "" {
-		return
-	}
-	patterns := []string{
-		filepath.Join(m.dataDir, "upstream-index.json.gz.tmp"),
-		filepath.Join(m.dataDir, "upstream-index-*.json.gz"),
-	}
-	for _, pattern := range patterns {
-		matches, _ := filepath.Glob(pattern)
-		for _, name := range matches {
-			_ = os.Remove(name)
-		}
-	}
-}
-
-func (m *Manager) snapshotPath() string { return filepath.Join(m.dataDir, "upstream-index.json.gz") }
 
 func (m *Manager) setError(err error) {
 	m.statusMu.Lock()
@@ -551,4 +684,58 @@ func (m *Manager) setError(err error) {
 	} else {
 		m.status.LastError = err.Error()
 	}
+}
+
+func (m *Manager) cleanupTemporaryFiles() {
+	recoverBackup(m.databasePath())
+	recoverBackup(m.sourceDir())
+	for _, path := range []string{m.databasePath() + ".tmp", filepath.Join(m.dataDir, "upstream-index.json.gz.tmp"), m.stagingSourceDir()} {
+		_ = os.RemoveAll(path)
+	}
+}
+
+func recoverBackup(target string) {
+	backup := target + ".prev"
+	if !fileExists(backup) {
+		return
+	}
+	if !fileExists(target) {
+		_ = os.Rename(backup, target)
+		return
+	}
+	_ = os.RemoveAll(backup)
+}
+
+func (m *Manager) removeLegacySnapshots() {
+	_ = os.Remove(filepath.Join(m.dataDir, "upstream-index.json.gz"))
+	matches, _ := filepath.Glob(filepath.Join(m.dataDir, "upstream-index-*.json.gz"))
+	for _, name := range matches {
+		_ = os.Remove(name)
+	}
+}
+
+func (m *Manager) databasePath() string     { return filepath.Join(m.dataDir, "upstream-index.db") }
+func (m *Manager) sourceDir() string        { return filepath.Join(m.dataDir, "upstream") }
+func (m *Manager) stagingSourceDir() string { return filepath.Join(m.dataDir, "upstream.next") }
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func copyFile(source, target string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }

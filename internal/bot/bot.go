@@ -528,7 +528,7 @@ func (b *Bot) status(ctx context.Context, chatID int64) {
 	if idx.LastError != "" {
 		lastError = idx.LastError
 	}
-	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n本地查询索引：%t / 已加载=%t\n规则文件：%d 个（仅保留最新快照）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d\n索引更新时间：%s\n索引异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, updated, lastError, b.service.SyncEnabled()), homeMenu())
+	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d\n索引更新时间：%s\n索引异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, updated, lastError, b.service.SyncEnabled()), homeMenu())
 }
 
 func (b *Bot) helpText() string {

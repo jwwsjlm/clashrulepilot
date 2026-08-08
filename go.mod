@@ -10,6 +10,7 @@ require (
 	github.com/jwwsjlm/req/v3 v3.58.5
 	github.com/robfig/cron/v3 v3.0.1
 	gitlab.com/gitlab-org/api/client-go v1.46.0
+	go.etcd.io/bbolt v1.5.0
 	golang.org/x/net v0.57.0
 )
 

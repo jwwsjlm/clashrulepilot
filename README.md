@@ -78,7 +78,7 @@ DATA_DIR=/app/data
 GEOIP_API_URL=https://ipwho.is/{ip}
 ```
 
-`SYNC_UPSTREAM=false` 只表示不向个人公开仓库镜像 Aethersailor 文件；本地查询索引仍会按 `SYNC_CRON` 更新。每轮同步都以远端当前文件清单完整重建索引，远端已删除或改名的文件会从新索引消失。宿主机 `./data` 中只保留最新的 `upstream-index.json.gz` 压缩快照，旧式快照与失败遗留的临时文件会被清理；同步失败时继续使用上一次完整成功快照。
+`SYNC_UPSTREAM=false` 只表示不向个人公开仓库镜像 Aethersailor 文件；本地查询索引仍会按 `SYNC_CRON` 更新。每轮同步都以远端当前文件清单完整重建索引，远端已删除或改名的文件会从新索引消失。原始域名规则落地到宿主机 `./data/upstream/`，查询索引保存为 `./data/upstream-index.db`。查询通过 bbolt 按需读取磁盘，不再把完整规则树常驻 Go 堆内存；同步失败时继续使用上一次完整成功数据库。
 
 ## OpenClash 接入
 

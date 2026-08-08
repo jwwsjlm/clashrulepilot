@@ -2,6 +2,7 @@ package ruleindex
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,8 +12,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gh "github.com/google/go-github/v81/github"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestParseAndQuery(t *testing.T) {
@@ -24,9 +27,7 @@ func TestParseAndQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := compile(diskSnapshot{Version: 2, Entries: append(direct, geo...)})
-	m := &Manager{}
-	m.current.Store(c)
+	m := testManagerWithEntries(t, append(direct, geo...))
 	cases := map[string]Action{"exact.example.com": Direct, "sub.example.org": Direct, "foo-m-team.net": Direct, "www.cn.example": GeoSite}
 	for domain, action := range cases {
 		got := m.Query(domain)
@@ -77,6 +78,7 @@ func TestSyncRebuildsFromLatestRemoteFileList(t *testing.T) {
 
 	dir := t.TempDir()
 	m := New(true, dir, "Aethersailor/Custom_OpenClash_Rules", "main", "")
+	t.Cleanup(func() { _ = m.Close() })
 	api := gh.NewClient(server.Client())
 	api.BaseURL, _ = url.Parse(server.URL + "/")
 	m.github = api
@@ -105,6 +107,23 @@ func TestSyncRebuildsFromLatestRemoteFileList(t *testing.T) {
 	if status.Sources != 2 { // current direct file + GEOSITE:CN
 		t.Fatalf("unexpected source count: %+v", status)
 	}
+	if _, err := os.Stat(filepath.Join(dir, "upstream", "Encrypted_DNS_Domain.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("deleted remote source file survived: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "upstream-index.db")); err != nil {
+		t.Fatalf("disk database missing: %v", err)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := New(true, dir, "Aethersailor/Custom_OpenClash_Rules", "main", "")
+	t.Cleanup(func() { _ = reloaded.Close() })
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reload disk database: %v", err)
+	}
+	if got := reloaded.Query("sub.direct.example"); len(got) != 1 || got[0].Source != "Custom_Direct_Domain.yaml" {
+		t.Fatalf("disk query after restart failed: %#v", got)
+	}
 }
 
 func TestLoadCleansOnlyKnownOldSnapshots(t *testing.T) {
@@ -118,6 +137,7 @@ func TestLoadCleansOnlyKnownOldSnapshots(t *testing.T) {
 		}
 	}
 	m := New(true, dir, "Aethersailor/Custom_OpenClash_Rules", "main", "")
+	t.Cleanup(func() { _ = m.Close() })
 	if err := m.Load(); err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +160,7 @@ func TestLiveIndexSync(t *testing.T) {
 		t.Skip("set CLASHRULEPILOT_LIVE_TEST=1 to test live rule sources")
 	}
 	m := New(true, t.TempDir(), "Aethersailor/Custom_OpenClash_Rules", "main", os.Getenv("GITHUB_TOKEN"))
+	t.Cleanup(func() { _ = m.Close() })
 	if changed, err := m.Sync(context.Background()); err != nil || !changed {
 		t.Fatalf("changed=%v err=%v status=%+v", changed, err, m.Status())
 	}
@@ -149,4 +170,42 @@ func TestLiveIndexSync(t *testing.T) {
 	if got := m.Query("www.baidu.com"); len(got) == 0 {
 		t.Fatal("expected www.baidu.com to match GEOSITE:CN")
 	}
+}
+
+func testManagerWithEntries(t *testing.T, entries []Entry) *Manager {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := diskMetadata{Version: 3, UpdatedAt: time.Now().UTC(), Sources: map[string]sourceMeta{"test": {SHA256: "test"}}}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{bucketExact, bucketSuffix, bucketKeyword, bucketMetadata} {
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
+		}
+		if err := storeEntries(tx, entries); err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(metadata)
+		if err != nil {
+			return err
+		}
+		return tx.Bucket(bucketMetadata).Put(metadataKey, encoded)
+	}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readDB, loaded, err := openReadDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{enabled: true, db: readDB, metadata: loaded, status: Status{Enabled: true, Loaded: true}}
+	t.Cleanup(func() { _ = m.Close() })
+	return m
 }
