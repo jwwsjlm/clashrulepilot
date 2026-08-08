@@ -20,11 +20,21 @@ func TestRejectIP(t *testing.T) {
 func TestExtractHostPortAndLog(t *testing.T) {
 	for input, want := range map[string]string{
 		"example.com:443": "example.com",
+		"example.com:":    "example.com",
 		"[TCP] 61.52.219.206:48638 --> subs.2519885.dpdns.org:443 match Match using group": "subs.2519885.dpdns.org",
+		"[TCP] 192.168.1.2:1234 --> newapi.linuxdo.edu.rs: match Match using group":        "newapi.linuxdo.edu.rs",
 	} {
 		got, err := Normalize(input)
 		if err != nil || got != want {
 			t.Fatalf("Normalize(%q)=%q,%v want %q", input, got, err, want)
+		}
+	}
+}
+
+func TestRejectMalformedTrailingPorts(t *testing.T) {
+	for _, input := range []string{"example.com::", "example.com:443:8443"} {
+		if _, err := Normalize(input); err == nil {
+			t.Fatalf("Normalize(%q) should reject malformed port", input)
 		}
 	}
 }

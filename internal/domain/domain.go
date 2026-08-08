@@ -93,6 +93,13 @@ func normalizeToken(raw string) (string, error) {
 			s = host
 		} else if i := strings.LastIndexByte(s, ':'); i > 0 && i < len(s)-1 && allDigits(s[i+1:]) {
 			s = s[:i]
+		} else if strings.HasSuffix(s, ":") && strings.Count(s, ":") == 1 {
+			// A trailing colon commonly appears when a host is copied from a
+			// log line or when a user starts typing host:port but omits the port.
+			// Only accept one terminal colon so double-colon and IPv6-like
+			// inputs remain invalid. Named service ports remain handled by
+			// net.SplitHostPort above for backwards compatibility.
+			s = strings.TrimSuffix(s, ":")
 		}
 	}
 	s = strings.TrimSuffix(strings.Trim(s, "."), ".")
