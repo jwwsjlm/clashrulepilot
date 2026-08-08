@@ -1010,7 +1010,13 @@ func (b *Bot) helpText() string {
 }
 
 func (b *Bot) welcomeText() string {
-	return "🧭 ClashRulePilot\n\n🔍 请先查询域名。\nBot 会检查个人规则、上游规则、DNS 与 IP 归属，再提供 🟢 直连或 🔴 代理建议。"
+	return "🧭 ClashRulePilot\n\n" +
+		"🔍 第一步：查询域名\n" +
+		"发送域名、URL、域名:端口，或完整 OpenClash 日志。\n\n" +
+		"🔎 查询内容\n" +
+		"👤 个人规则 · 📚 上游规则\n" +
+		"🌐 国内/国外 DNS · 📍 IP 归属\n\n" +
+		"查询完成后，再选择 🟢 直连 或 🔴 代理。"
 }
 
 func (b *Bot) repo(ctx context.Context, chatID int64) {
@@ -1129,8 +1135,7 @@ func keyboard(rows [][]button) *models.InlineKeyboardMarkup {
 }
 func mainMenu() *models.InlineKeyboardMarkup {
 	return keyboard([][]button{
-		{{Text: "🔍 查询域名", Data: "menu:query"}},
-		{{Text: "📊 运行状态", Data: "menu:status"}},
+		{{Text: "🔍 查询域名", Data: "menu:query"}, {Text: "📊 运行状态", Data: "menu:status"}},
 		{{Text: "🔗 规则仓库", Data: "menu:repo"}, {Text: "ℹ️ 使用帮助", Data: "menu:help"}},
 	})
 }

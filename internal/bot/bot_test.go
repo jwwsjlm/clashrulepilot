@@ -14,8 +14,8 @@ import (
 func TestMainMenuUsesInlineKeyboard(t *testing.T) {
 	menu := mainMenu()
 	rows := menu.InlineKeyboard
-	if len(rows) != 3 {
-		t.Fatalf("expected 3 menu rows, got %d", len(rows))
+	if len(rows) != 2 || len(rows[0]) != 2 || len(rows[1]) != 2 {
+		t.Fatalf("expected a 2x2 menu grid, got %#v", rows)
 	}
 	count := 0
 	want := map[string]bool{
