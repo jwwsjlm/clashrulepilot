@@ -76,6 +76,20 @@ func TestHomeMenuUsesInlineKeyboard(t *testing.T) {
 	}
 }
 
+func TestCancelMenuIsSingleStepToMainMenu(t *testing.T) {
+	menu := cancelMenu()
+	if len(menu.InlineKeyboard) != 1 || len(menu.InlineKeyboard[0]) != 1 {
+		t.Fatalf("cancel menu should contain one unambiguous action: %#v", menu)
+	}
+	button := menu.InlineKeyboard[0][0]
+	if button.CallbackData != "nav:cancel" || button.Text != "✖️ 取消并返回主菜单" {
+		t.Fatalf("unexpected cancel button: %#v", button)
+	}
+	if strings.Contains(button.Text, "已取消") {
+		t.Fatal("cancel button must not depend on an intermediate cancellation message")
+	}
+}
+
 func TestSmartMatchMenuForSubdomain(t *testing.T) {
 	p := &pending{OriginalDomain: "cdn.legendsen.se", Domain: "cdn.legendsen.se", RootDomain: "legendsen.se"}
 	text, menu := matchMenuContent(p)
@@ -103,7 +117,7 @@ func TestSmartMatchMenuForSubdomain(t *testing.T) {
 			labels = append(labels, item.Text)
 		}
 	}
-	for _, want := range []string{"🎯 仅当前域名", "🌿 当前域名及下级", "🌐 整个主域名", "🧰 高级匹配", "✖️ 取消"} {
+	for _, want := range []string{"🎯 仅当前域名", "🌿 当前域名及下级", "🌐 整个主域名", "🧰 高级匹配", "✖️ 取消并返回主菜单"} {
 		found := false
 		for _, label := range labels {
 			if label == want {

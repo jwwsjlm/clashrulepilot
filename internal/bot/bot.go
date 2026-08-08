@@ -144,7 +144,7 @@ func (b *Bot) handle(ctx context.Context, _ *tgbot.Bot, item *models.Update) {
 				}
 				rows = append(rows, []button{{Text: candidate, Data: fmt.Sprintf("domain:pick:%d", n)}})
 			}
-			rows = append(rows, []button{{Text: "✖️ 取消", Data: "nav:cancel"}})
+			rows = append(rows, []button{{Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}})
 			b.send(ctx, item.Message.Chat.ID, "检测到多个域名，请选择：", keyboard(rows))
 		}
 	case "/remove":
@@ -207,7 +207,7 @@ func (b *Bot) handlePendingText(ctx context.Context, chatID int64, text string) 
 		for n, candidate := range candidates {
 			rows = append(rows, []button{{Text: candidate, Data: fmt.Sprintf("domain:pick:%d", n)}})
 		}
-		rows = append(rows, []button{{Text: "✖️ 取消", Data: "nav:cancel"}})
+		rows = append(rows, []button{{Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}})
 		b.send(ctx, chatID, "检测到多个域名，请选择需要处理的目标：", keyboard(rows))
 		return true
 	}
@@ -275,7 +275,7 @@ func matchMenuContent(p *pending) (string, *models.InlineKeyboardMarkup) {
 	}
 	rows = append(rows,
 		[]button{{Text: "🧰 高级匹配", Data: "match:advanced"}},
-		[]button{{Text: "✖️ 取消", Data: "nav:cancel"}},
+		[]button{{Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 	)
 	return text.String(), keyboard(rows)
 }
@@ -294,7 +294,7 @@ func (b *Bot) showAdvancedMenuTarget(ctx context.Context, chatID int64, p *pendi
 		{{Text: "🔑 关键词", Data: "advanced:keyword"}},
 		{{Text: "✳️ 通配符", Data: "advanced:wildcard"}},
 		{{Text: "🧩 正则表达式", Data: "advanced:regex"}},
-		{{Text: "↩️ 返回范围选择", Data: "advanced:back"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
+		{{Text: "↩️ 返回范围选择", Data: "advanced:back"}, {Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 	}))
 }
 
@@ -307,7 +307,7 @@ func (b *Bot) showAdvancedOptionTarget(ctx context.Context, chatID int64, p *pen
 	text := fmt.Sprintf("%s\n\n建议值：\n%s\n\n优点：%s\n风险：%s\n\n你可以使用建议值，或者输入自定义内容。", name, p.AdvancedSuggest, benefit, risk)
 	b.sendTarget(ctx, chatID, target, text, keyboard([][]button{
 		{{Text: "✅ 使用建议", Data: "advanced:use"}, {Text: "✍️ 自定义输入", Data: "advanced:custom"}},
-		{{Text: "↩️ 返回高级匹配", Data: "match:advanced"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
+		{{Text: "↩️ 返回高级匹配", Data: "match:advanced"}, {Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 	}))
 }
 
@@ -319,7 +319,7 @@ func (b *Bot) showAdvancedConfirmationTarget(ctx context.Context, chatID int64, 
 	name, _, risk := advancedDescription(p.Match)
 	text := fmt.Sprintf("⚠️ 请确认高级规则\n\n类型：%s\n准备提交：%s\n动作：%s\n\n风险：%s", name, rules.Token(toRule(p, 0)), actionText(p.Action), risk)
 	b.sendTarget(ctx, chatID, target, text, keyboard([][]button{
-		{{Text: "✅ 确认提交", Data: "advanced:confirm"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
+		{{Text: "✅ 确认提交", Data: "advanced:confirm"}, {Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 	}))
 }
 
@@ -337,7 +337,7 @@ func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pendin
 	if conflict, ok := err.(*app.ConflictError); ok {
 		b.setBusy(chatID, false)
 		b.send(ctx, chatID, fmt.Sprintf("⚠️ 更改域名分组确认（第 2 步）\n\n规则：%s\n当前分组：%s\n目标分组：%s\n\n确认后会移动现有规则并生成新的 Git commit。OpenClash 下次更新远程覆写后将使用新分组。", rules.Token(conflict.Existing), actionText(conflict.Existing.Action), actionText(p.Action)), keyboard([][]button{
-			{{Text: "🔄 确认更改分组", Data: "confirm:yes"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
+			{{Text: "🔄 确认更改分组", Data: "confirm:yes"}, {Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 		}))
 		return
 	}
@@ -401,7 +401,7 @@ func (b *Bot) addStart(ctx context.Context, chatID int64, parts []string) {
 	b.replaceSession(chatID, &pending{Mode: "add", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)})
 	b.send(ctx, chatID, "请选择规则动作：", keyboard([][]button{
 		{{Text: "🟢 直连", Data: "route:direct"}, {Text: "🔴 代理", Data: "route:proxy"}},
-		{{Text: "✖️ 取消", Data: "nav:cancel"}},
+		{{Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 	}))
 }
 
@@ -470,7 +470,7 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		return
 	case "nav:cancel", "cancel", "confirm:no":
 		b.clear(chatID)
-		b.sendTarget(ctx, chatID, message, "已取消当前操作。", homeEditMenu())
+		b.sendTarget(ctx, chatID, message, b.welcomeText(), mainMenu())
 		return
 	}
 	if strings.HasPrefix(query.Data, "dns:details:") {
@@ -649,7 +649,7 @@ func (b *Bot) removeDomain(ctx context.Context, chatID int64, domainName string)
 	}
 	b.replaceSession(chatID, &pending{Mode: "remove_confirm", Domain: domainName, OriginalDomain: domainName, DeleteRules: matched})
 	b.send(ctx, chatID, removalConfirmationText(domainName, matched), keyboard([][]button{
-		{{Text: "🗑️ 确认删除", Data: "remove:confirm"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
+		{{Text: "🗑️ 确认删除", Data: "remove:confirm"}, {Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 	}))
 }
 
@@ -678,7 +678,7 @@ func (b *Bot) confirmRemoval(ctx context.Context, chatID int64, p *pending) {
 		}
 		p.DeleteRules = current
 		b.send(ctx, chatID, "⚠️ 待删除规则在确认期间发生了变化，请重新核对：\n\n"+removalConfirmationText(p.Domain, current), keyboard([][]button{
-			{{Text: "🗑️ 再次确认删除", Data: "remove:confirm"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
+			{{Text: "🗑️ 再次确认删除", Data: "remove:confirm"}, {Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 		}))
 		return
 	}
@@ -1112,7 +1112,7 @@ func errorMenu() *models.InlineKeyboardMarkup {
 	return backMenu()
 }
 func cancelMenu() *models.InlineKeyboardMarkup {
-	return keyboard([][]button{{{Text: "✖️ 取消", Data: "nav:cancel"}, {Text: "🏠 主菜单", Data: "nav:home:edit"}}})
+	return keyboard([][]button{{{Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}}})
 }
 func (b *Bot) send(ctx context.Context, chatID int64, text string, kb models.ReplyMarkup) {
 	b.sendTarget(ctx, chatID, nil, text, kb)
