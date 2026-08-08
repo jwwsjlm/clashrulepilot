@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"clashrulepilot/internal/app"
 	"clashrulepilot/internal/config"
 	"clashrulepilot/internal/domain"
+	"clashrulepilot/internal/lookup"
 	"clashrulepilot/internal/ruleindex"
 	"clashrulepilot/internal/rules"
 	tgbot "github.com/go-telegram/bot"
@@ -26,12 +28,17 @@ type Bot struct {
 }
 
 type pending struct {
-	Mode       string
-	Domain     string
-	Action     rules.Action
-	Match      rules.Match
-	Busy       bool
-	Candidates []string
+	Mode            string
+	OriginalDomain  string
+	Domain          string
+	RootDomain      string
+	Action          rules.Action
+	Match           rules.Match
+	AdvancedMatch   rules.Match
+	AdvancedSuggest string
+	AwaitingPattern bool
+	Busy            bool
+	Candidates      []string
 }
 
 type button struct {
@@ -140,7 +147,22 @@ func (b *Bot) handlePendingText(ctx context.Context, chatID int64, text string) 
 	b.mu.Lock()
 	p := b.sessions[chatID]
 	b.mu.Unlock()
-	if p == nil || p.Domain != "" || p.Mode == "" {
+	if p == nil || p.Mode == "" {
+		return false
+	}
+	if p.AwaitingPattern {
+		value, err := rules.ValidatePattern(p.AdvancedMatch, text)
+		if err != nil {
+			b.send(ctx, chatID, "匹配内容无效："+err.Error()+"\n请重新输入，或点击取消。", cancelMenu())
+			return true
+		}
+		p.AwaitingPattern = false
+		p.Domain = value
+		p.Match = p.AdvancedMatch
+		b.showAdvancedConfirmation(ctx, chatID, p)
+		return true
+	}
+	if p.Domain != "" {
 		return false
 	}
 	if strings.TrimSpace(text) == "" {
@@ -149,6 +171,12 @@ func (b *Bot) handlePendingText(ctx context.Context, chatID int64, text string) 
 	}
 	candidates, err := domain.Extract(text)
 	if err != nil {
+		if p.Mode == "remove" {
+			value := strings.TrimSpace(text)
+			b.clear(chatID)
+			b.removeDomain(ctx, chatID, value)
+			return true
+		}
 		b.send(ctx, chatID, "域名无效："+err.Error()+"\n请重新发送域名或 URL。", cancelMenu())
 		return true
 	}
@@ -174,11 +202,10 @@ func (b *Bot) handlePendingText(ctx context.Context, chatID int64, text string) 
 func (b *Bot) acceptDomain(ctx context.Context, chatID int64, p *pending, domainName string) {
 	switch p.Mode {
 	case "add":
+		p.OriginalDomain = domainName
 		p.Domain = domainName
-		b.send(ctx, chatID, "请选择匹配方式：", keyboard([][]button{
-			{{Text: "精确域名", Data: "match:exact"}, {Text: "包含子域名", Data: "match:suffix"}},
-			{{Text: "取消", Data: "nav:cancel"}},
-		}))
+		p.RootDomain = domain.RuleRoot(domainName)
+		b.showMatchMenu(ctx, chatID, p)
 	case "query":
 		b.clear(chatID)
 		b.query(ctx, chatID, domainName)
@@ -186,6 +213,114 @@ func (b *Bot) acceptDomain(ctx context.Context, chatID int64, p *pending, domain
 		b.clear(chatID)
 		b.removeDomain(ctx, chatID, domainName)
 	}
+}
+
+func (b *Bot) showMatchMenu(ctx context.Context, chatID int64, p *pending) {
+	text, menu := matchMenuContent(p)
+	b.send(ctx, chatID, text, menu)
+}
+
+func matchMenuContent(p *pending) (string, *models.InlineKeyboardMarkup) {
+	input := p.OriginalDomain
+	if input == "" {
+		input = p.Domain
+		p.OriginalDomain = input
+	}
+	root := p.RootDomain
+	if root == "" {
+		root = domain.RuleRoot(input)
+		p.RootDomain = root
+	}
+	var text strings.Builder
+	fmt.Fprintf(&text, "请选择规则覆盖范围：\n\n输入域名：%s", input)
+	if root != "" {
+		fmt.Fprintf(&text, "\n安全主域名：%s", root)
+	}
+	fmt.Fprintf(&text, "\n\n🎯 仅当前域名\nDOMAIN,%s\n优点：范围最小，不会误伤其他子域名\n缺点：123.%s 不会命中", input, input)
+	rows := [][]button{{{Text: "🎯 仅 " + input, Data: "match:exact"}}}
+	if root == "" {
+		text.WriteString("\n\n⚠️ 无法安全识别可注册主域名，因此已隐藏后缀范围，避免覆盖公共或共享后缀。")
+	} else if root == input {
+		fmt.Fprintf(&text, "\n\n🌐 整个主域名（推荐）\nDOMAIN-SUFFIX,%s\n优点：匹配主域名和所有子域名\n缺点：www、api、cdn 等都会使用同一动作", input)
+		rows = append(rows, []button{{Text: "⭐ 整个 " + input, Data: "match:suffix"}})
+	} else {
+		fmt.Fprintf(&text, "\n\n🌿 当前域名及下级（推荐）\nDOMAIN-SUFFIX,%s\n优点：覆盖当前域名和所有下级域名\n缺点：不会覆盖同主域名下的其他分支", input)
+		rows = append(rows, []button{{Text: "⭐ " + input + " + 下级", Data: "match:suffix"}})
+		if root != "" {
+			fmt.Fprintf(&text, "\n\n🌐 整个主域名\nDOMAIN-SUFFIX,%s\n优点：一次覆盖整个网站\n缺点：所有子域名都会使用同一动作", root)
+			rows = append(rows, []button{{Text: "🌐 整个 " + root, Data: "match:root"}})
+		}
+	}
+	rows = append(rows,
+		[]button{{Text: "🧰 高级匹配", Data: "match:advanced"}},
+		[]button{{Text: "取消", Data: "nav:cancel"}},
+	)
+	return text.String(), keyboard(rows)
+}
+
+func (b *Bot) showAdvancedMenu(ctx context.Context, chatID int64, p *pending) {
+	text := "🧰 高级域名匹配\n\n" +
+		"🔑 DOMAIN-KEYWORD\n包含关键词即命中；灵活但容易误匹配。\n\n" +
+		"🌟 DOMAIN-WILDCARD\n使用 * 和 ?；比关键词可控，但 *.example.com 通常不匹配根域名。\n\n" +
+		"🧩 DOMAIN-REGEX\n表达能力最强；最难维护且容易写错。\n\n" +
+		"常规域名优先使用上一页的 DOMAIN 或 DOMAIN-SUFFIX。"
+	b.send(ctx, chatID, text, keyboard([][]button{
+		{{Text: "🔑 关键词", Data: "advanced:keyword"}},
+		{{Text: "🌟 通配符", Data: "advanced:wildcard"}},
+		{{Text: "🧩 正则表达式", Data: "advanced:regex"}},
+		{{Text: "⬅️ 返回范围选择", Data: "advanced:back"}, {Text: "取消", Data: "nav:cancel"}},
+	}))
+}
+
+func (b *Bot) showAdvancedOption(ctx context.Context, chatID int64, p *pending) {
+	name, benefit, risk := advancedDescription(p.AdvancedMatch)
+	text := fmt.Sprintf("%s\n\n建议值：\n%s\n\n优点：%s\n风险：%s\n\n你可以使用建议值，或者输入自定义内容。", name, p.AdvancedSuggest, benefit, risk)
+	b.send(ctx, chatID, text, keyboard([][]button{
+		{{Text: "✅ 使用建议", Data: "advanced:use"}, {Text: "✍️ 自定义输入", Data: "advanced:custom"}},
+		{{Text: "⬅️ 返回高级匹配", Data: "match:advanced"}, {Text: "取消", Data: "nav:cancel"}},
+	}))
+}
+
+func (b *Bot) showAdvancedConfirmation(ctx context.Context, chatID int64, p *pending) {
+	name, _, risk := advancedDescription(p.Match)
+	text := fmt.Sprintf("⚠️ 请确认高级规则\n\n类型：%s\n准备提交：%s\n动作：%s\n\n风险：%s", name, rules.Token(toRule(p, 0)), actionText(p.Action), risk)
+	b.send(ctx, chatID, text, keyboard([][]button{
+		{{Text: "确认提交", Data: "advanced:confirm"}, {Text: "取消", Data: "nav:cancel"}},
+	}))
+}
+
+func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pending, force bool) {
+	if !b.markBusy(chatID) {
+		b.send(ctx, chatID, "⏳ 当前规则正在处理中，请勿重复点击。", homeMenu())
+		return
+	}
+	verb := "正在检查冲突并提交"
+	if force {
+		verb = "正在移动规则并提交"
+	}
+	b.send(ctx, chatID, fmt.Sprintf("⏳ 已选择：%s\n准备提交：%s\n%s到%s，请稍候……", matchText(p.Match), rules.Token(toRule(p, userID)), verb, repoProviderText(b.cfg.RuleRepoProvider)), nil)
+	result, err := b.service.AddRule(ctx, toRule(p, userID), force)
+	if conflict, ok := err.(*app.ConflictError); ok {
+		b.setBusy(chatID, false)
+		b.send(ctx, chatID, fmt.Sprintf("发现同类型规则：\n%s,%s\n当前动作：%s\n目标动作：%s\n\n是否移动到新的动作？", rules.Token(conflict.Existing), strings.ToUpper(string(conflict.Existing.Action)), actionText(conflict.Existing.Action), actionText(p.Action)), keyboard([][]button{
+			{{Text: "确认移动", Data: "confirm:yes"}, {Text: "取消", Data: "nav:cancel"}},
+		}))
+		return
+	}
+	b.clear(chatID)
+	if err != nil {
+		message := err.Error()
+		if strings.Contains(message, "rule already exists") {
+			message = "该规则已经存在，无需重复提交"
+		}
+		b.send(ctx, chatID, "提交失败："+message, homeMenu())
+		return
+	}
+	var extra string
+	if len(result.Related) > 0 {
+		extra = fmt.Sprintf("\n\n⚠️ 已保留 %d 条相反动作的父子/重叠规则。生成的显式规则会按精确度排序，更具体的规则优先。", len(result.Related))
+	}
+	b.send(ctx, chatID, fmt.Sprintf("✅ 规则已提交\n\n动作：%s\n规则：%s\n覆盖：%s\ncommit：%s%s", actionText(p.Action), rules.Token(toRule(p, userID)), coverageText(p), short(result.Commit), extra), homeMenu())
 }
 
 func (b *Bot) startAddMode(ctx context.Context, chatID int64, action rules.Action) {
@@ -224,7 +359,7 @@ func (b *Bot) addStart(ctx context.Context, chatID int64, parts []string) {
 		return
 	}
 	b.mu.Lock()
-	b.sessions[chatID] = &pending{Mode: "add", Domain: domainName}
+	b.sessions[chatID] = &pending{Mode: "add", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
 	b.mu.Unlock()
 	b.send(ctx, chatID, "请选择规则动作：", keyboard([][]button{
 		{{Text: "直连", Data: "route:direct"}, {Text: "代理", Data: "route:proxy"}},
@@ -308,28 +443,60 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 	case "route:proxy":
 		pendingRule.Action = rules.Proxy
 	case "match:exact":
+		pendingRule.Domain = pendingRule.OriginalDomain
 		pendingRule.Match = rules.Exact
 	case "match:suffix":
+		pendingRule.Domain = pendingRule.OriginalDomain
 		pendingRule.Match = rules.Suffix
+	case "match:root":
+		if pendingRule.RootDomain == "" {
+			b.send(ctx, chatID, "无法安全识别主域名，请选择其他范围。", cancelMenu())
+			return
+		}
+		pendingRule.Domain = pendingRule.RootDomain
+		pendingRule.Match = rules.Suffix
+	case "match:advanced":
+		b.showAdvancedMenu(ctx, chatID, pendingRule)
+		return
+	case "advanced:keyword", "advanced:wildcard", "advanced:regex":
+		pendingRule.AdvancedMatch = rules.Match(strings.TrimPrefix(query.Data, "advanced:"))
+		pendingRule.AdvancedSuggest = advancedSuggestion(pendingRule.AdvancedMatch, pendingRule.OriginalDomain, pendingRule.RootDomain)
+		b.showAdvancedOption(ctx, chatID, pendingRule)
+		return
+	case "advanced:back":
+		b.showMatchMenu(ctx, chatID, pendingRule)
+		return
+	case "advanced:use":
+		value, err := rules.ValidatePattern(pendingRule.AdvancedMatch, pendingRule.AdvancedSuggest)
+		if err != nil {
+			b.send(ctx, chatID, "建议规则生成失败："+err.Error(), cancelMenu())
+			return
+		}
+		pendingRule.Domain = value
+		pendingRule.Match = pendingRule.AdvancedMatch
+		b.showAdvancedConfirmation(ctx, chatID, pendingRule)
+		return
+	case "advanced:custom":
+		pendingRule.AwaitingPattern = true
+		b.send(ctx, chatID, advancedInputPrompt(pendingRule.AdvancedMatch), cancelMenu())
+		return
+	case "advanced:confirm":
+		b.commitPending(ctx, chatID, query.From.ID, pendingRule, false)
+		return
 	case "override:direct":
 		pendingRule.Mode = "add"
 		pendingRule.Action = rules.Direct
 		pendingRule.Match = ""
+		pendingRule.OriginalDomain = pendingRule.Domain
+		pendingRule.RootDomain = domain.RuleRoot(pendingRule.Domain)
 	case "override:proxy":
 		pendingRule.Mode = "add"
 		pendingRule.Action = rules.Proxy
 		pendingRule.Match = ""
+		pendingRule.OriginalDomain = pendingRule.Domain
+		pendingRule.RootDomain = domain.RuleRoot(pendingRule.Domain)
 	case "confirm:yes":
-		if !b.markBusy(chatID) {
-			return
-		}
-		result, err := b.service.AddRule(ctx, toRule(pendingRule, query.From.ID), true)
-		b.clear(chatID)
-		if err != nil {
-			b.send(ctx, chatID, "提交失败："+err.Error(), homeMenu())
-		} else {
-			b.send(ctx, chatID, fmt.Sprintf("规则已移动并提交。\ncommit=%s", short(result.Commit)), homeMenu())
-		}
+		b.commitPending(ctx, chatID, query.From.ID, pendingRule, true)
 		return
 	default:
 		log.Printf("telegram callback ignored: unknown data=%q", query.Data)
@@ -338,30 +505,11 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 	}
 
 	if pendingRule.Action != "" && pendingRule.Match == "" {
-		b.send(ctx, chatID, "请选择匹配方式：", keyboard([][]button{
-			{{Text: "精确域名", Data: "match:exact"}, {Text: "包含子域名", Data: "match:suffix"}},
-			{{Text: "取消", Data: "nav:cancel"}},
-		}))
+		b.showMatchMenu(ctx, chatID, pendingRule)
 		return
 	}
 	if pendingRule.Action != "" && pendingRule.Match != "" {
-		if !b.markBusy(chatID) {
-			return
-		}
-		result, err := b.service.AddRule(ctx, toRule(pendingRule, query.From.ID), false)
-		if conflict, ok := err.(*app.ConflictError); ok {
-			b.setBusy(chatID, false)
-			b.send(ctx, chatID, fmt.Sprintf("该规则已存在：%s/%s。是否移动到 %s？", conflict.Existing.Action, conflict.Existing.Match, pendingRule.Action), keyboard([][]button{
-				{{Text: "确认移动", Data: "confirm:yes"}, {Text: "取消", Data: "nav:cancel"}},
-			}))
-			return
-		}
-		b.clear(chatID)
-		if err != nil {
-			b.send(ctx, chatID, "提交失败："+err.Error(), homeMenu())
-		} else {
-			b.send(ctx, chatID, fmt.Sprintf("规则已提交：%s %s/%s\ncommit=%s", pendingRule.Domain, pendingRule.Action, pendingRule.Match, short(result.Commit)), homeMenu())
-		}
+		b.commitPending(ctx, chatID, query.From.ID, pendingRule, false)
 	}
 }
 
@@ -374,10 +522,10 @@ func (b *Bot) remove(ctx context.Context, chatID int64, parts []string) {
 		b.send(ctx, chatID, "用法：/remove example.com", homeMenu())
 		return
 	}
-	domainName, err := domain.Normalize(strings.Join(parts[1:], " "))
+	value := strings.Join(parts[1:], " ")
+	domainName, err := domain.Normalize(value)
 	if err != nil {
-		b.send(ctx, chatID, "域名无效："+err.Error(), homeMenu())
-		return
+		domainName = strings.TrimSpace(value)
 	}
 	b.removeDomain(ctx, chatID, domainName)
 }
@@ -444,26 +592,20 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	if len(gfwText) == 0 {
 		gfwText = []string{"未找到"}
 	}
-	chinaSignal := "未检测到"
-	if len(result.Network.FakeIP) > 0 && result.Network.ChinaChecked == 0 && result.Network.GeoError == "" {
-		chinaSignal = "无法判断（DNS 返回 Fake-IP）"
-	} else if result.Network.GeoError != "" {
+	chinaSignal := fmt.Sprintf("未检测到（已检查 %d 个真实地址）", result.Network.ChinaChecked)
+	if result.Network.GeoError != "" {
 		chinaSignal = "检测失败（" + result.Network.GeoError + "）"
 	} else if result.Network.China {
-		chinaSignal = fmt.Sprintf("检测到（%d 个地址已检查）", result.Network.ChinaChecked)
+		chinaSignal = fmt.Sprintf("检测到（已检查 %d 个真实地址）", result.Network.ChinaChecked)
+	} else if len(result.Network.A)+len(result.Network.AAAA) == 0 {
+		chinaSignal = "无法判断（没有取得真实公网 IP）"
 	}
-	dnsText := fmt.Sprintf("A %d · AAAA %d", len(result.Network.A), len(result.Network.AAAA))
-	if len(result.Network.FakeIP) > 0 {
-		dnsText += fmt.Sprintf(" · Fake-IP %d", len(result.Network.FakeIP))
-	}
-	if result.Network.DNSError != "" {
-		dnsText = "解析失败"
-	}
+	dnsText := formatDNSReport(result.Network)
 	root := result.Network.Registrable
 	if root == "" {
 		root = "未识别"
 	}
-	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n🧱 GEOSITE:GFW：%s\n📡 中国大陆信号：%s\n🌐 DNS 解析：%s · 可注册域名 %s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), chinaSignal, dnsText, root)
+	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n🧱 GEOSITE:GFW：%s\n\n🌐 DNS 解析：%s\n可注册域名：%s\n\n📡 中国大陆信号：%s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), dnsText, root, chinaSignal)
 	rows := [][]button{}
 	if hasProxy {
 		rows = append(rows, []button{{Text: "🎯 覆写为个人直连", Data: "override:direct"}})
@@ -474,7 +616,7 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	rows = append(rows, []button{{Text: "🏠 返回主菜单", Data: "nav:home"}})
 	if hasDirect || hasProxy {
 		b.mu.Lock()
-		b.sessions[chatID] = &pending{Mode: "query_override", Domain: domainName}
+		b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
 		b.mu.Unlock()
 	}
 	b.send(ctx, chatID, text, keyboard(rows))
@@ -492,12 +634,13 @@ func (b *Bot) list(ctx context.Context, chatID int64) {
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "个人规则共 %d 条：\n", len(store.Rules))
-	for i, r := range store.Rules {
+	ordered := rules.Ordered(store.Rules)
+	for i, r := range ordered {
 		if i >= 80 {
-			fmt.Fprintf(&out, "\n… 其余 %d 条未显示", len(store.Rules)-i)
+			fmt.Fprintf(&out, "\n… 其余 %d 条未显示", len(ordered)-i)
 			break
 		}
-		fmt.Fprintf(&out, "%d. %s %s/%s\n", i+1, r.Domain, r.Action, r.Match)
+		fmt.Fprintf(&out, "%d. %s → %s\n", i+1, rules.Token(r), actionText(r.Action))
 	}
 	b.send(ctx, chatID, out.String(), homeMenu())
 }
@@ -530,6 +673,7 @@ func (b *Bot) status(ctx context.Context, chatID int64) {
 		return
 	}
 	idx := b.service.IndexStatus()
+	dns := b.service.LookupStatus()
 	updated := "从未"
 	if !idx.UpdatedAt.IsZero() {
 		updated = idx.UpdatedAt.In(b.cfg.Location).Format("2006-01-02 15:04:05")
@@ -538,11 +682,19 @@ func (b *Bot) status(ctx context.Context, chatID int64) {
 	if idx.LastError != "" {
 		lastError = idx.LastError
 	}
-	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, b.service.SyncEnabled()), homeMenu())
+	dohError := "无"
+	if dns.LastError != "" {
+		dohError = dns.LastError
+	}
+	provider := dns.LastProvider
+	if provider == "" {
+		provider = "尚未使用"
+	}
+	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DoH：启用=%t · 缓存=%d · 最近=%s\nDoH 异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.CacheEntries, provider, dohError, b.service.SyncEnabled()), homeMenu())
 }
 
 func (b *Bot) helpText() string {
-	return "ClashRulePilot 使用帮助\n\n点击消息中的 Inline 按钮即可操作。支持发送纯域名、URL、域名:端口或完整 OpenClash/Mihomo 日志。添加规则时再选择精确匹配或包含子域名。\n\n命令仍然兼容：/query、/add、/remove、/list、/sync、/status、/help"
+	return "ClashRulePilot 使用帮助\n\n支持纯域名、URL、域名:端口和完整 OpenClash/Mihomo 日志。Fake-IP 模式下会使用公网 DoH 获取真实 IP。\n\n域名匹配：\n• DOMAIN：仅完整域名，最安全，但不含子域名。\n• DOMAIN-SUFFIX：域名及所有下级，最适合网站/CDN，但主域名范围可能过大。\n• DOMAIN-KEYWORD：包含关键词即命中，灵活但容易误伤。\n• DOMAIN-WILDCARD：支持 * 和 ?，可控但规则更难理解。\n• DOMAIN-REGEX：能力最强，但最难维护且匹配成本最高。\n• GEOSITE：维护好的域名分类，依赖数据库更新。\n• RULE-SET：批量远程规则，存在更新延迟。\n\n命令兼容：/query、/add、/remove、/list、/sync、/status、/help"
 }
 
 func (b *Bot) welcomeText() string {
@@ -632,10 +784,20 @@ func actionText(a rules.Action) string {
 	return "代理"
 }
 func matchText(m rules.Match) string {
-	if m == rules.Exact {
-		return "精确"
+	switch m {
+	case rules.Exact:
+		return "仅当前域名"
+	case rules.Suffix:
+		return "域名及下级"
+	case rules.Keyword:
+		return "关键词"
+	case rules.Wildcard:
+		return "通配符"
+	case rules.Regex:
+		return "正则表达式"
+	default:
+		return "未知"
 	}
-	return "包含子域名"
 }
 func indexActionText(a ruleindex.Action) string {
 	switch a {
@@ -648,4 +810,114 @@ func indexActionText(a ruleindex.Action) string {
 	default:
 		return "未知"
 	}
+}
+
+func advancedSuggestion(match rules.Match, input, root string) string {
+	if root == "" {
+		root = input
+	}
+	switch match {
+	case rules.Keyword:
+		parts := strings.Split(input, ".")
+		candidate := parts[0]
+		common := map[string]bool{"www": true, "api": true, "cdn": true, "static": true, "img": true, "assets": true, "gw": true, "gateway": true}
+		if common[candidate] {
+			candidate = strings.Split(root, ".")[0]
+		}
+		return candidate
+	case rules.Wildcard:
+		return "*." + root
+	case rules.Regex:
+		return `(^|\.)` + regexp.QuoteMeta(root) + `$`
+	default:
+		return input
+	}
+}
+
+func advancedDescription(match rules.Match) (name, benefit, risk string) {
+	switch match {
+	case rules.Keyword:
+		return "🔑 DOMAIN-KEYWORD", "域名结构变化时仍可按固定标识命中", "任何包含该字符串的无关域名也可能被匹配"
+	case rules.Wildcard:
+		return "🌟 DOMAIN-WILDCARD", "可以使用 * 和 ? 描述固定域名格式", "*.example.com 通常只覆盖子域名，不包含 example.com"
+	case rules.Regex:
+		return "🧩 DOMAIN-REGEX", "可以表达复杂的域名模式", "最难维护；表达式过宽会误匹配，错误表达式无法提交"
+	default:
+		return "高级匹配", "", ""
+	}
+}
+
+func advancedInputPrompt(match rules.Match) string {
+	switch match {
+	case rules.Keyword:
+		return "请输入关键词，例如：oops\n只要域名中包含该文字就会命中。"
+	case rules.Wildcard:
+		return "请输入通配符，例如：*.oops.asia\n支持 * 和 ?。"
+	case rules.Regex:
+		return "请输入正则表达式，例如：(^|\\.)oops\\.asia$\n使用 Go/Mihomo 兼容的正则语法。"
+	default:
+		return "请输入匹配内容："
+	}
+}
+
+func coverageText(p *pending) string {
+	switch p.Match {
+	case rules.Exact:
+		return "仅 " + p.Domain
+	case rules.Suffix:
+		return p.Domain + " 以及所有下级域名"
+	case rules.Keyword:
+		return "所有包含 “" + p.Domain + "” 的域名"
+	case rules.Wildcard:
+		return "所有符合通配符 “" + p.Domain + "” 的域名"
+	case rules.Regex:
+		return "所有符合正则表达式的域名"
+	default:
+		return p.Domain
+	}
+}
+
+func repoProviderText(provider string) string {
+	if strings.EqualFold(provider, "gitlab") {
+		return " GitLab"
+	}
+	return " GitHub"
+}
+
+func formatDNSReport(report lookup.Report) string {
+	var out strings.Builder
+	switch report.DNSSource {
+	case "doh":
+		fmt.Fprintf(&out, "公网 DoH · %s", report.DoHProvider)
+		if report.DoHCacheHit {
+			out.WriteString("（缓存）")
+		}
+	case "local":
+		out.WriteString("本地 DNS")
+	default:
+		out.WriteString("未取得真实结果")
+	}
+	if len(report.FakeIP) > 0 {
+		fmt.Fprintf(&out, "\n本地 DNS：Fake-IP %d", len(report.FakeIP))
+	} else if report.DNSError != "" {
+		out.WriteString("\n本地 DNS：解析失败")
+	} else {
+		fmt.Fprintf(&out, "\n本地 DNS：A %d · AAAA %d", len(report.LocalA), len(report.LocalAAAA))
+	}
+	fmt.Fprintf(&out, "\n真实结果：A %d · AAAA %d", len(report.A), len(report.AAAA))
+	addresses := append(append([]string{}, report.A...), report.AAAA...)
+	if len(addresses) > 0 {
+		display := addresses
+		if len(display) > 4 {
+			display = display[:4]
+		}
+		fmt.Fprintf(&out, "\n真实 IP：%s", strings.Join(display, "、"))
+		if len(addresses) > len(display) {
+			fmt.Fprintf(&out, "（另有 %d 个）", len(addresses)-len(display))
+		}
+	}
+	if report.DoHError != "" {
+		fmt.Fprintf(&out, "\nDoH：失败（%s）", report.DoHError)
+	}
+	return out.String()
 }

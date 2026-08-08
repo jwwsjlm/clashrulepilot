@@ -6,10 +6,10 @@
 
 - 定时列出 `Aethersailor/Custom_OpenClash_Rules/rule`，只下载当前的 `*_Domain.yaml`，并额外下载 GEOSITE:CN、GEOSITE:GFW 建立本地查询索引；不拉取整个仓库、`.mrs`、IP 或端口规则。
 - 支持从域名、URL、`host:port` 和完整 OpenClash/Mihomo 日志智能提取目标域名。
-- 查询个人规则、Aethersailor、GEOSITE:CN、GEOSITE:GFW、DNS 和大陆 IP 信号。
+- 查询个人规则、Aethersailor、GEOSITE:CN、GEOSITE:GFW、DNS 和大陆 IP 信号；本地返回 Fake-IP 时自动通过公网 DoH 获取真实地址。
 - 上游代理/直连规则可通过 Telegram 双向覆写为个人规则。
 - Telegram 私聊白名单默认只有 `538031590`。
-- 添加规则时选择直连/代理、精确域名/包含子域名；冲突时二次确认移动。
+- 添加规则时智能选择精确域名、当前域名及下级或安全主域名；高级菜单支持关键词、通配符和正则，冲突时二次确认移动。
 - GitHub Trees API 或 GitLab Commits API 原子提交，避免多文件半更新。
 
 外部服务协议优先使用成熟开源库：Telegram 使用 `go-telegram/bot`，GitHub 使用 `google/go-github`，GitLab 使用官方 `api/client-go`，YAML 使用 `goccy/go-yaml`，GeoIP HTTPS 使用你的 `jwwsjlm/req/v3`，其他下载重试使用 `go-retryablehttp`。完整版本和许可证见 [docs/open-source-dependencies.md](docs/open-source-dependencies.md)。
@@ -76,17 +76,33 @@ UPSTREAM_INDEX_ENABLED=true
 SYNC_CRON=0 3 * * *
 DATA_DIR=/app/data
 GEOIP_API_URL=https://ipwho.is/{ip}
+DOH_ENABLED=true
+DOH_API_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve
+DOH_TIMEOUT=4s
+DOH_CACHE_SIZE=2048
 ```
 
 `SYNC_UPSTREAM=false` 只表示不向个人公开仓库镜像 Aethersailor 文件；本地查询索引仍会按 `SYNC_CRON` 更新。每轮同步都以远端当前文件清单完整重建索引，远端已删除或改名的文件会从新索引消失。原始域名规则、`GEOSITE_CN.yaml` 和 `GEOSITE_GFW.yaml` 落地到宿主机 `./data/upstream/`，查询索引保存为 `./data/upstream-index.db`。查询通过 bbolt 按需读取磁盘，不再把完整规则树常驻 Go 堆内存；同步失败时继续使用上一次完整成功数据库。
 
-如果 OpenClash/Mihomo 使用 `fake-ip` DNS 模式，容器查询可能得到 `198.18.0.0/15` 或 `fdfe:dcba:9876::/64` 中的合成地址。程序会把它标记为 Fake-IP，并跳过公网 GeoIP 请求，避免把“保留地址被 GeoIP 服务拒绝”误报为查询失败。
+如果 OpenClash/Mihomo 使用 `fake-ip` DNS 模式，容器查询可能得到 `198.18.0.0/15` 或 `fdfe:dcba:9876::/64` 中的合成地址。程序会保留本地 Fake-IP 诊断信息，并依次请求 Cloudflare、Google DoH 获取真实 A/AAAA，再将真实地址交给 GeoIP。DoH 仅在本地没有真实地址时触发，结果按 DNS TTL 缓存。
+
+## 域名匹配方式
+
+- `DOMAIN`：只匹配完整域名，范围最小，不包含下级域名。
+- `DOMAIN-SUFFIX`：匹配填写的域名及其所有下级，适合网站和 CDN；选择主域名时范围较大。
+- `DOMAIN-KEYWORD`：域名包含关键词即命中，灵活但容易误匹配。
+- `DOMAIN-WILDCARD`：支持 `*`、`?`，比关键词可控；`*.example.com` 通常不包含根域名。
+- `DOMAIN-REGEX`：支持复杂正则，能力最强但最难维护。
+- `GEOSITE`：维护好的分类数据，依赖数据库更新。
+- `RULE-SET`：引用批量规则集合，存在远程依赖和更新延迟。
+
+Bot 默认只展示安全的 `DOMAIN` 和两种 `DOMAIN-SUFFIX` 范围，高级类型放在独立菜单并要求二次确认。规则主域名使用严格 Public Suffix List 计算，避免把动态 DNS 租户规则扩大到整个共享后缀。
 
 ## OpenClash 接入
 
 公开规则仓库创建后，在 **服务 → OpenClash → 覆写设置 → 覆写模块** 中订阅 `openclash/personal-overwrite.ini` 的 Raw 地址，类型选择远程/HTTP，目标配置选择“所有配置文件”。
 
-该文件通过 `[YAML]` 的 `+rules` 把 `my_proxy`、`my_direct` 放在订阅规则前面，因此个人直连能够覆盖 Aethersailor 代理规则，个人代理也能覆盖上游直连规则。OpenClash 中原有 Aethersailor 覆写无需删除。
+该文件通过 `[YAML]` 的显式 `+rules` 把每条个人规则插入订阅规则之前，并按“精确规则、深层后缀、浅层后缀、通配符、关键词、正则”排序。这样相反动作的精确子域名可以作为主域名规则的例外。OpenClash 中原有 Aethersailor 覆写无需删除。
 
 OpenClash 专项行为规范见 [docs/openclash-guide.md](docs/openclash-guide.md)。
 

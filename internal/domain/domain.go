@@ -145,3 +145,15 @@ func Registrable(name string) string {
 	}
 	return root
 }
+
+// RuleRoot returns the strict effective-TLD-plus-one used when expanding a
+// rule to a registrable domain. Unlike Registrable it never shortens private
+// hosting suffixes for presentation, preventing a tenant rule from expanding
+// to every user of a shared dynamic-DNS service.
+func RuleRoot(name string) string {
+	root, err := publicsuffix.EffectiveTLDPlusOne(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), ".")))
+	if err != nil {
+		return ""
+	}
+	return root
+}

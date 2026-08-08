@@ -31,14 +31,14 @@
 
 ## 规则库与 OpenClash 的关系
 
-Bot 生成的个人 YAML 是 Mihomo `classical` rule-provider 内容；策略目标不写进 YAML，而是在 OpenClash 的 `rules:` 中通过 `RULE-SET` 指定：
+Bot 仍生成 Mihomo `classical` rule-provider 文件用于兼容和查看，但推荐的 `personal-overwrite.ini` 直接生成显式个人规则：
 
 ```yaml
-rules:
-  - RULE-SET,my_proxy,🚀 手动选择
-  - RULE-SET,my_direct,DIRECT
++rules:
+  - DOMAIN,cdn.example.com,DIRECT
+  - DOMAIN-SUFFIX,example.com,🚀 手动选择
 ```
 
-个人规则必须排在上游规则之前，否则上游的 `DOMAIN-SUFFIX` 规则可能先命中。
+个人规则必须排在上游规则之前，否则上游规则可能先命中。显式规则按精确度排序，使更具体的子域名规则能够覆盖较宽的主域名规则。
 
 ClashRulePilot 生成的 `personal-overwrite.ini` 使用 `[YAML]` 和 `+rules` 前置插入。根据权威指南第 8 章，OpenClash 会先下载远程覆写到 `/etc/openclash/overwrite/`，再将覆写内容合并到运行配置。Bot 的本地 Aethersailor 索引只用于查询，不参与路由器防火墙链，也不会改变 nftables/iptables 透明代理规则。

@@ -45,6 +45,22 @@ func TestRegistrable(t *testing.T) {
 	}
 }
 
+func TestRuleRootIsStrict(t *testing.T) {
+	for input, want := range map[string]string{
+		"cdn.legendsen.se":        "legendsen.se",
+		"subs.2519885.dpdns.org":  "2519885.dpdns.org",
+		"www.example.co.uk":       "example.co.uk",
+		"xn--fsqu00a.xn--0zwm56d": "xn--fsqu00a.xn--0zwm56d",
+	} {
+		if got := RuleRoot(input); got != want {
+			t.Fatalf("RuleRoot(%q)=%q want %q", input, got, want)
+		}
+	}
+	if got := RuleRoot("co.uk"); got != "" {
+		t.Fatalf("public suffix must not become a rule root: %q", got)
+	}
+}
+
 func TestNormalizePlainDomainWithLetterT(t *testing.T) {
 	got, err := Normalize("testingcf.jsdelivr.net")
 	if err != nil || got != "testingcf.jsdelivr.net" {

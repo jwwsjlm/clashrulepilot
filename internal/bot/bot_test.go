@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"clashrulepilot/internal/rules"
 )
 
 func TestMainMenuUsesInlineKeyboard(t *testing.T) {
@@ -68,5 +70,71 @@ func TestHomeMenuUsesInlineKeyboard(t *testing.T) {
 	rows := menu.InlineKeyboard
 	if len(rows) != 1 || len(rows[0]) != 1 || rows[0][0].CallbackData != "nav:home" {
 		t.Fatalf("unexpected home menu: %#v", menu)
+	}
+}
+
+func TestSmartMatchMenuForSubdomain(t *testing.T) {
+	p := &pending{OriginalDomain: "cdn.legendsen.se", Domain: "cdn.legendsen.se", RootDomain: "legendsen.se"}
+	text, menu := matchMenuContent(p)
+	for _, want := range []string{"DOMAIN,cdn.legendsen.se", "DOMAIN-SUFFIX,cdn.legendsen.se", "DOMAIN-SUFFIX,legendsen.se"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing explanation %q in %s", want, text)
+		}
+	}
+	wantCallbacks := map[string]bool{"match:exact": false, "match:suffix": false, "match:root": false, "match:advanced": false, "nav:cancel": false}
+	for _, row := range menu.InlineKeyboard {
+		for _, item := range row {
+			if _, ok := wantCallbacks[item.CallbackData]; ok {
+				wantCallbacks[item.CallbackData] = true
+			}
+		}
+	}
+	for callback, found := range wantCallbacks {
+		if !found {
+			t.Fatalf("missing callback %s", callback)
+		}
+	}
+}
+
+func TestSmartMatchMenuForRootHasNoDuplicateRootButton(t *testing.T) {
+	p := &pending{OriginalDomain: "legendsen.se", Domain: "legendsen.se", RootDomain: "legendsen.se"}
+	_, menu := matchMenuContent(p)
+	rootCount := 0
+	for _, row := range menu.InlineKeyboard {
+		for _, item := range row {
+			if item.CallbackData == "match:root" {
+				rootCount++
+			}
+		}
+	}
+	if rootCount != 0 {
+		t.Fatalf("root input must not include duplicate match:root button")
+	}
+}
+
+func TestSmartMatchMenuHidesUnsafeSuffixForPublicSuffix(t *testing.T) {
+	p := &pending{OriginalDomain: "co.uk", Domain: "co.uk"}
+	text, menu := matchMenuContent(p)
+	if !strings.Contains(text, "已隐藏后缀范围") {
+		t.Fatalf("missing public suffix warning: %s", text)
+	}
+	for _, row := range menu.InlineKeyboard {
+		for _, item := range row {
+			if item.CallbackData == "match:suffix" || item.CallbackData == "match:root" {
+				t.Fatalf("unsafe suffix callback was displayed: %s", item.CallbackData)
+			}
+		}
+	}
+}
+
+func TestAdvancedSuggestions(t *testing.T) {
+	if got := advancedSuggestion(rules.Keyword, "gw2.oops.asia", "oops.asia"); got != "gw2" {
+		t.Fatalf("keyword suggestion=%q", got)
+	}
+	if got := advancedSuggestion(rules.Wildcard, "gw2.oops.asia", "oops.asia"); got != "*.oops.asia" {
+		t.Fatalf("wildcard suggestion=%q", got)
+	}
+	if got := advancedSuggestion(rules.Regex, "gw2.oops.asia", "oops.asia"); got != `(^|\.)oops\.asia$` {
+		t.Fatalf("regex suggestion=%q", got)
 	}
 }

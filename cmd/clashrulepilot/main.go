@@ -41,7 +41,7 @@ func main() {
 		log.Printf("data directory warning: %s", runtimeInfo.Warning)
 	}
 	log.Printf("data directory ready path=%s uid=%d gid=%d dropped_root=%t", cfg.DataDir, runtimeInfo.UID, runtimeInfo.GID, runtimeInfo.Dropped)
-	log.Printf("starting ClashRulePilot provider=%s repo=%s branch=%s sync_upstream=%t upstream_index=%t health=%s telegram_enabled=%t", cfg.RuleRepoProvider, cfg.RuleRepoProject, cfg.RuleRepoBranch, cfg.SyncUpstream, cfg.UpstreamIndex, cfg.HealthAddr, cfg.TelegramToken != "")
+	log.Printf("starting ClashRulePilot provider=%s repo=%s branch=%s sync_upstream=%t upstream_index=%t doh=%t health=%s telegram_enabled=%t", cfg.RuleRepoProvider, cfg.RuleRepoProject, cfg.RuleRepoBranch, cfg.SyncUpstream, cfg.UpstreamIndex, cfg.DoHEnabled, cfg.HealthAddr, cfg.TelegramToken != "")
 	service, err := app.New(cfg)
 	if err != nil {
 		log.Fatal(err)

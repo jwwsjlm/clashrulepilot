@@ -9,7 +9,8 @@ ClashRulePilot 优先使用持续维护、职责清晰的开源库，避免自�
 | `gitlab.com/gitlab-org/api/client-go` | `v1.46.0` | GitLab 项目、文件、分支和原子 commit `actions[]` | Apache-2.0 |
 | `github.com/goccy/go-yaml` | `v1.19.2` | Aethersailor 与 GEOSITE classical YAML 解析 | MIT |
 | `github.com/hashicorp/go-retryablehttp` | `v0.7.8` | GitHub 与规则下载的退避重试 | MPL-2.0 |
-| `github.com/jwwsjlm/req/v3` | `v3.58.5` | GeoIP HTTPS 请求、响应解码与退避重试 | MIT |
+| `github.com/hashicorp/golang-lru/v2` | `v2.0.7` | 公网 DoH 查询结果的容量限制 LRU 缓存 | MPL-2.0 |
+| `github.com/jwwsjlm/req/v3` | `v3.58.5` | GeoIP 和公网 DoH HTTPS 请求、响应解码与退避重试 | MIT |
 | `github.com/robfig/cron/v3` | `v3.0.1` | `SYNC_CRON` 定时调度 | MIT |
 | `go.etcd.io/bbolt` | `v1.5.0` | 磁盘域名索引、事务更新和按需查询 | MIT |
 | `golang.org/x/net` | `v0.57.0` | IDN 和 Public Suffix List | BSD-3-Clause |

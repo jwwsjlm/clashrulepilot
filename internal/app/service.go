@@ -42,6 +42,7 @@ type Result struct {
 	Changed      int
 	Store        rules.Store
 	IndexChanged bool
+	Related      []rules.Rule
 }
 
 type QueryResult struct {
@@ -71,7 +72,7 @@ func New(cfg config.Config) (*Service, error) {
 	default:
 		return nil, fmt.Errorf("unsupported rule repository provider %q", cfg.RuleRepoProvider)
 	}
-	return &Service{cfg: cfg, repo: repo, upstream: syncer.New(cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), index: ruleindex.New(cfg.UpstreamIndex, cfg.DataDir, cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), lookup: lookup.New(cfg.GeoIPAPIURL)}, nil
+	return &Service{cfg: cfg, repo: repo, upstream: syncer.New(cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), index: ruleindex.New(cfg.UpstreamIndex, cfg.DataDir, cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), lookup: lookup.New(cfg.GeoIPAPIURL, lookup.DoHConfig{Enabled: cfg.DoHEnabled, Endpoints: cfg.DoHAPIURLs, Timeout: cfg.DoHTimeout, CacheSize: cfg.DoHCacheSize})}, nil
 }
 func (s *Service) Ready() bool                   { s.mu.Lock(); defer s.mu.Unlock(); return s.ready }
 func (s *Service) Close() error                  { return s.index.Close() }
@@ -80,6 +81,7 @@ func (s *Service) IndexEnabled() bool            { return s.cfg.UpstreamIndex }
 func (s *Service) RepoWebURL() string            { return s.repo.WebURL() }
 func (s *Service) RepoRawURL(file string) string { return s.repo.RawURL(file) }
 func (s *Service) IndexStatus() ruleindex.Status { return s.index.Status() }
+func (s *Service) LookupStatus() lookup.Status   { return s.lookup.Status() }
 func (s *Service) Bootstrap(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,6 +117,7 @@ func (s *Service) AddRule(ctx context.Context, r rules.Rule, force bool) (Result
 	if err != nil {
 		return Result{}, err
 	}
+	related := rules.Related(store.Rules, r)
 	conflict, duplicate := store.Add(r)
 	if duplicate {
 		return Result{Store: store}, fmt.Errorf("rule already exists")
@@ -137,7 +140,7 @@ func (s *Service) AddRule(ctx context.Context, r rules.Rule, force bool) (Result
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Commit: sha, Changed: 1, Store: store}, nil
+	return Result{Commit: sha, Changed: 1, Store: store, Related: related}, nil
 }
 
 func (s *Service) RemoveRule(ctx context.Context, domainName string, match *rules.Match) (Result, error) {
@@ -222,12 +225,8 @@ func (s *Service) Query(ctx context.Context, domainName string) (QueryResult, er
 		return QueryResult{}, err
 	}
 	result := QueryResult{Domain: domainName, Upstream: s.index.Query(domainName)}
-	for _, r := range store.Rules {
-		matched := r.Domain == domainName
-		if r.Match == rules.Suffix {
-			matched = domainName == r.Domain || strings.HasSuffix(domainName, "."+r.Domain)
-		}
-		if matched {
+	for _, r := range rules.Ordered(store.Rules) {
+		if rules.Matches(r, domainName) {
 			result.Personal = append(result.Personal, r)
 		}
 	}
@@ -256,7 +255,7 @@ func (s *Service) desiredFiles(ctx context.Context, store *rules.Store, encoded 
 	}
 	direct := rules.Render(*store, rules.Direct, s.cfg.ProxyPolicyGroup)
 	proxy := rules.Render(*store, rules.Proxy, s.cfg.ProxyPolicyGroup)
-	files := map[string][]byte{personalPath: append(encoded, '\n'), "rules/personal/My_Direct_Domain.yaml": direct, "rules/personal/My_Proxy_Domain.yaml": proxy, "README.md": []byte(s.readme()), "LICENSE-THIRD-PARTY.md": []byte(thirdPartyLicense()), "openclash/providers.yaml": []byte(s.providers(upstream)), "openclash/rules-order.yaml": []byte(s.ruleOrder(upstream)), "openclash/personal-overwrite.ini": []byte(s.personalOverwrite())}
+	files := map[string][]byte{personalPath: append(encoded, '\n'), "rules/personal/My_Direct_Domain.yaml": direct, "rules/personal/My_Proxy_Domain.yaml": proxy, "README.md": []byte(s.readme()), "LICENSE-THIRD-PARTY.md": []byte(thirdPartyLicense()), "openclash/providers.yaml": []byte(s.providers(upstream)), "openclash/rules-order.yaml": []byte(s.ruleOrder(upstream)), "openclash/personal-overwrite.ini": []byte(s.personalOverwrite(*store))}
 	if s.cfg.SyncUpstream {
 		files["openclash/overwrite.ini"] = []byte(s.overwrite(upstream))
 	}
@@ -283,7 +282,7 @@ func (s *Service) commitChanged(ctx context.Context, files map[string][]byte, ms
 	return s.repo.CommitFiles(ctx, changed, msg)
 }
 func (s *Service) readme() string {
-	return fmt.Sprintf("# ClashRulePilot Rules\n\n个人 OpenClash/Mihomo 规则库，由 ClashRulePilot 维护。代理策略组默认为 `%s`。\n\n上游：[%s](https://github.com/%s)\n\n将 `openclash/providers.yaml` 与 `openclash/rules-order.yaml` 内容加入 OpenClash 覆写配置。个人规则放在上游规则之前。\n\n项目源码保留在本地 `D:\\\\code\\\\myproxy`，本仓库只发布规则。\n", s.cfg.ProxyPolicyGroup, s.cfg.UpstreamRepo, s.cfg.UpstreamRepo)
+	return fmt.Sprintf("# ClashRulePilot Rules\n\n个人 OpenClash/Mihomo 规则库，由 ClashRulePilot 维护。代理策略组默认为 `%s`。\n\n上游：[%s](https://github.com/%s)\n\nOpenClash 推荐使用 `openclash/personal-overwrite.ini`。该文件将个人规则以显式 `+rules` 写入，并按精确度排序，使更具体的子域名例外优先。\n\n项目源码不包含在本规则仓库中，本仓库只发布规则文件。\n", s.cfg.ProxyPolicyGroup, s.cfg.UpstreamRepo, s.cfg.UpstreamRepo)
 }
 func (s *Service) providers(upstream map[string][]byte) string {
 	var b strings.Builder
@@ -314,10 +313,8 @@ func (s *Service) overwrite(upstream map[string][]byte) string {
 	return "[YAML]\n" + providers + "\n" + order
 }
 
-func (s *Service) personalOverwrite() string {
-	providers := s.providers(nil)
-	order := strings.Replace(s.ruleOrder(nil), "rules:\n", "+rules:\n", 1)
-	return "[YAML]\n" + providers + "\n" + order
+func (s *Service) personalOverwrite(store rules.Store) string {
+	return "[YAML]\n" + string(rules.RenderExplicit(store, s.cfg.ProxyPolicyGroup))
 }
 
 func sortedNames(m map[string][]byte) []string {

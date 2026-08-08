@@ -26,6 +26,10 @@ type Config struct {
 	HealthAddr       string
 	DataDir          string
 	GeoIPAPIURL      string
+	DoHEnabled       bool
+	DoHAPIURLs       []string
+	DoHTimeout       time.Duration
+	DoHCacheSize     int
 	SyncUpstream     bool
 	UpstreamIndex    bool
 	Location         *time.Location
@@ -54,12 +58,30 @@ func Load() (Config, error) {
 	}
 	legacyRepo := getenv("GITHUB_RULE_REPO_NAME", "clash-rule-pilot-rules")
 	legacyBranch := getenv("GITHUB_BRANCH", "main")
+	dohTimeout, err := time.ParseDuration(getenv("DOH_TIMEOUT", "4s"))
+	if err != nil || dohTimeout <= 0 {
+		return Config{}, fmt.Errorf("invalid DOH_TIMEOUT %q", os.Getenv("DOH_TIMEOUT"))
+	}
+	dohCacheSize, err := strconv.Atoi(getenv("DOH_CACHE_SIZE", "2048"))
+	if err != nil || dohCacheSize <= 0 {
+		return Config{}, fmt.Errorf("DOH_CACHE_SIZE must be a positive integer")
+	}
+	var dohURLs []string
+	for _, raw := range strings.Split(getenv("DOH_API_URLS", "https://cloudflare-dns.com/dns-query,https://dns.google/resolve"), ",") {
+		if value := strings.TrimSpace(raw); value != "" {
+			dohURLs = append(dohURLs, value)
+		}
+	}
+	if getenvBool("DOH_ENABLED", true) && len(dohURLs) == 0 {
+		return Config{}, fmt.Errorf("DOH_API_URLS must contain at least one endpoint when DOH_ENABLED=true")
+	}
 	return Config{
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"), Allowlist: allow,
 		RuleRepoProvider: provider, RuleRepoProject: getenv("RULE_REPO_PROJECT", legacyRepo), RuleRepoBranch: getenv("RULE_REPO_BRANCH", legacyBranch),
 		GitHubToken: os.Getenv("GITHUB_TOKEN"), GitLabToken: os.Getenv("GITLAB_TOKEN"), GitLabBaseURL: strings.TrimRight(getenv("GITLAB_BASE_URL", "https://gitlab.com"), "/"),
 		UpstreamRepo: getenv("UPSTREAM_REPO", "Aethersailor/Custom_OpenClash_Rules"), UpstreamBranch: getenv("UPSTREAM_BRANCH", "main"), ProxyPolicyGroup: getenv("PROXY_POLICY_GROUP", "🚀 手动选择"),
 		SyncCron: getenv("SYNC_CRON", "0 3 * * *"), HealthAddr: getenv("HEALTH_ADDR", ":8080"), DataDir: getenv("DATA_DIR", "/app/data"), GeoIPAPIURL: getenv("GEOIP_API_URL", "https://ipwho.is/{ip}"),
+		DoHEnabled: getenvBool("DOH_ENABLED", true), DoHAPIURLs: dohURLs, DoHTimeout: dohTimeout, DoHCacheSize: dohCacheSize,
 		SyncUpstream: getenvBool("SYNC_UPSTREAM", false), UpstreamIndex: getenvBool("UPSTREAM_INDEX_ENABLED", true), Location: loc,
 	}, nil
 }
