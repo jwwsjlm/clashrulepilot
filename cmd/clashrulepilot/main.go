@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"clashrulepilot/internal/app"
 	"clashrulepilot/internal/bot"
@@ -41,7 +39,7 @@ func main() {
 		log.Printf("data directory warning: %s", runtimeInfo.Warning)
 	}
 	log.Printf("data directory ready path=%s uid=%d gid=%d dropped_root=%t", cfg.DataDir, runtimeInfo.UID, runtimeInfo.GID, runtimeInfo.Dropped)
-	log.Printf("starting ClashRulePilot provider=%s repo=%s branch=%s sync_upstream=%t upstream_index=%t doh=%t health=%s telegram_enabled=%t", cfg.RuleRepoProvider, cfg.RuleRepoProject, cfg.RuleRepoBranch, cfg.SyncUpstream, cfg.UpstreamIndex, cfg.DoHEnabled, cfg.HealthAddr, cfg.TelegramToken != "")
+	log.Printf("starting ClashRulePilot provider=%s repo=%s branch=%s sync_upstream=%t upstream_index=%t doh=%t telegram_enabled=%t", cfg.RuleRepoProvider, cfg.RuleRepoProject, cfg.RuleRepoBranch, cfg.SyncUpstream, cfg.UpstreamIndex, cfg.DoHEnabled, cfg.TelegramToken != "")
 	service, err := app.New(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -54,7 +52,6 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("github bootstrap complete; service ready")
-	go serveHealth(ctx, cfg.HealthAddr, service)
 	if cfg.TelegramToken == "" {
 		log.Printf("Telegram disabled: TELEGRAM_BOT_TOKEN is empty")
 	} else {
@@ -94,24 +91,6 @@ func main() {
 		}()
 	}
 	<-ctx.Done()
-}
-
-func serveHealth(ctx context.Context, addr string, service *app.Service) {
-	log.Printf("health endpoint listening on %s/healthz", addr)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if service.Ready() {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok\n"))
-			return
-		}
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
-	})
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("health server: %v", err)
-	}
 }
 
 func init() {

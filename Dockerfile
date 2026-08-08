@@ -19,5 +19,4 @@ COPY --from=build /out/app /app
 # Start as root only long enough for the Go entrypoint to chown DATA_DIR;
 # it immediately drops to uid/gid 65532 before network services start.
 USER root:root
-EXPOSE 8080
 ENTRYPOINT ["/clashrulepilot"]

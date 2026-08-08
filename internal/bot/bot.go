@@ -485,6 +485,14 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		b.send(ctx, chatID, "操作已过期，请返回主菜单重新开始。", errorMenu())
 		return
 	}
+	if query.Data == "query:remove" {
+		if pendingRule.Mode != "query_override" || pendingRule.Domain == "" {
+			b.sendTarget(ctx, chatID, message, "查询会话已过期，请重新查询域名。", errorMenu())
+			return
+		}
+		b.removeDomain(ctx, chatID, pendingRule.Domain)
+		return
+	}
 	if strings.HasPrefix(query.Data, "domain:pick:") {
 		var n int
 		if _, err := fmt.Sscanf(query.Data, "domain:pick:%d", &n); err != nil || n < 0 || n >= len(pendingRule.Candidates) {
@@ -833,6 +841,9 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 			{Text: "🔴 添加代理（需确认）", Data: "suggest:proxy"},
 		})
 	}
+	if len(result.Personal) > 0 {
+		rows = append(rows, []button{{Text: "🗑️ 删除匹配的个人规则", Data: "query:remove"}})
+	}
 	b.setQuerySession(chatID, domainName, &result)
 	b.send(ctx, chatID, text, keyboard(rows))
 }
@@ -1119,7 +1130,7 @@ func keyboard(rows [][]button) *models.InlineKeyboardMarkup {
 func mainMenu() *models.InlineKeyboardMarkup {
 	return keyboard([][]button{
 		{{Text: "🔍 查询域名", Data: "menu:query"}},
-		{{Text: "🗑️ 删除规则", Data: "menu:remove"}, {Text: "📊 运行状态", Data: "menu:status"}},
+		{{Text: "📊 运行状态", Data: "menu:status"}},
 		{{Text: "🔗 规则仓库", Data: "menu:repo"}, {Text: "ℹ️ 使用帮助", Data: "menu:help"}},
 	})
 }

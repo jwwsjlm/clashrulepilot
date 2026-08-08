@@ -19,7 +19,7 @@ func TestMainMenuUsesInlineKeyboard(t *testing.T) {
 	}
 	count := 0
 	want := map[string]bool{
-		"menu:query": false, "menu:remove": false, "menu:status": false, "menu:repo": false, "menu:help": false,
+		"menu:query": false, "menu:status": false, "menu:repo": false, "menu:help": false,
 	}
 	for _, row := range rows {
 		count += len(row)
@@ -33,8 +33,8 @@ func TestMainMenuUsesInlineKeyboard(t *testing.T) {
 			want[item.CallbackData] = true
 		}
 	}
-	if count != 5 {
-		t.Fatalf("expected 5 menu buttons, got %d", count)
+	if count != 4 {
+		t.Fatalf("expected 4 menu buttons, got %d", count)
 	}
 	for callback, found := range want {
 		if !found {
@@ -50,6 +50,9 @@ func TestMainMenuUsesInlineKeyboard(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"callback_data":"menu:query"`) {
 		t.Fatalf("menu JSON is missing Telegram callback_data: %s", data)
+	}
+	if strings.Contains(string(data), "menu:remove") {
+		t.Fatalf("delete must not be present in the main menu: %s", data)
 	}
 }
 

@@ -38,7 +38,6 @@ type Service struct {
 	storeLoaded    bool
 	storeRetryAt   time.Time
 	storeLastError string
-	ready          bool
 	lastSync       time.Time
 }
 type ConflictError struct{ Existing rules.Rule }
@@ -90,7 +89,6 @@ func New(cfg config.Config) (*Service, error) {
 		Timeout:  cfg.DNSTimeout, CacheSize: cfg.DNSCacheSize,
 	})}, nil
 }
-func (s *Service) Ready() bool                   { s.mu.Lock(); defer s.mu.Unlock(); return s.ready }
 func (s *Service) Close() error                  { return s.index.Close() }
 func (s *Service) SyncEnabled() bool             { return s.cfg.SyncUpstream }
 func (s *Service) IndexEnabled() bool            { return s.cfg.UpstreamIndex }
@@ -107,7 +105,6 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	if err := s.repo.EnsureRepo(ctx); err != nil {
 		if s.storeCacheExists() {
 			log.Printf("rule repository bootstrap unavailable; using local personal rules cache: %v", err)
-			s.ready = true
 			return nil
 		}
 		return err
@@ -121,7 +118,6 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		// index queries, or the Telegram bot from starting. Writes will retry
 		// after the repository becomes reachable again.
 		log.Printf("personal rules unavailable during bootstrap; continuing without remote personal rules: %v", err)
-		s.ready = true
 		return nil
 	}
 	files, err := s.desiredFiles(ctx, &store, nil, nil)
@@ -131,12 +127,10 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	if _, err := s.commitChanged(ctx, files, "chore: initialize ClashRulePilot rules"); err != nil {
 		if s.storeCacheExists() {
 			log.Printf("rule repository bootstrap commit unavailable; using local personal rules cache: %v", err)
-			s.ready = true
 			return nil
 		}
 		return err
 	}
-	s.ready = true
 	return nil
 }
 

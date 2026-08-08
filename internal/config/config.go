@@ -23,7 +23,6 @@ type Config struct {
 	UpstreamBranch     string
 	ProxyPolicyGroup   string
 	SyncCron           string
-	HealthAddr         string
 	DataDir            string
 	GeoIPAPIURL        string
 	DoHEnabled         bool
@@ -92,7 +91,7 @@ func Load() (Config, error) {
 		RuleRepoProvider: provider, RuleRepoProject: getenv("RULE_REPO_PROJECT", legacyRepo), RuleRepoBranch: getenv("RULE_REPO_BRANCH", legacyBranch),
 		GitHubToken: os.Getenv("GITHUB_TOKEN"), GitLabToken: os.Getenv("GITLAB_TOKEN"), GitLabBaseURL: strings.TrimRight(getenv("GITLAB_BASE_URL", "https://gitlab.com"), "/"),
 		UpstreamRepo: getenv("UPSTREAM_REPO", "Aethersailor/Custom_OpenClash_Rules"), UpstreamBranch: getenv("UPSTREAM_BRANCH", "main"), ProxyPolicyGroup: getenv("PROXY_POLICY_GROUP", "🚀 手动选择"),
-		SyncCron: getenv("SYNC_CRON", "0 3 * * *"), HealthAddr: getenv("HEALTH_ADDR", ":8080"), DataDir: getenv("DATA_DIR", "/app/data"), GeoIPAPIURL: getenv("GEOIP_API_URL", "https://ipwho.is/{ip}"),
+		SyncCron: getenv("SYNC_CRON", "0 3 * * *"), DataDir: getenv("DATA_DIR", "/app/data"), GeoIPAPIURL: getenv("GEOIP_API_URL", "https://ipwho.is/{ip}"),
 		DoHEnabled: legacyEnabled, DoHAPIURLs: legacyURLs, DoHTimeout: dnsTimeout, DoHCacheSize: dnsCacheSize,
 		DomesticDNSEnabled: domesticEnabled, DomesticDNSURLs: domesticURLs, ForeignDNSEnabled: foreignEnabled, ForeignDNSURLs: foreignURLs,
 		DNSTimeout: dnsTimeout, DNSCacheSize: dnsCacheSize,
