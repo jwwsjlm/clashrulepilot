@@ -1307,11 +1307,11 @@ func (b *Bot) sendDNSDetailsTarget(ctx context.Context, chatID int64, data strin
 	fmt.Fprintf(&out, "📍 DNS/IP 详细结果\n查询域名：%s", domainName)
 	shown := 0
 	if data == "dns:details:domestic" || data == "dns:details:all" {
-		out.WriteString("\n🇨🇳 国内 DNS\n")
+		out.WriteString("\n\n🇨🇳 国内 DNS\n")
 		appendDNSGroupDetails(&out, result.Network.Domestic, geo, &shown)
 	}
 	if data == "dns:details:foreign" || data == "dns:details:all" {
-		out.WriteString("\n🌍 国外 DNS\n")
+		out.WriteString("\n\n🌍 国外 DNS\n")
 		appendDNSGroupDetails(&out, result.Network.Foreign, geo, &shown)
 	}
 	b.sendTarget(ctx, chatID, target, out.String(), backMenu())
@@ -1326,9 +1326,9 @@ func appendDNSGroupDetails(out *strings.Builder, group lookup.DNSGroupResult, ge
 	if group.UsedBackup {
 		status = "备用端点"
 	}
-	fmt.Fprintf(out, "端点：%s\n状态：%s\n", provider, status)
+	fmt.Fprintf(out, "端点：%s\n状态：%s\n\n解析记录：", provider, status)
 	if group.Error != "" && len(group.A)+len(group.AAAA) == 0 {
-		fmt.Fprintf(out, "错误：%s", group.Error)
+		fmt.Fprintf(out, "\n错误：%s", group.Error)
 		return
 	}
 	index := 0
@@ -1358,9 +1358,9 @@ func appendDNSGroupDetails(out *strings.Builder, group lookup.DNSGroupResult, ge
 	}
 	if index == 0 {
 		if total == 0 {
-			out.WriteString("无有效 A/AAAA 地址")
+			out.WriteString("\n无有效 A/AAAA 地址")
 		} else {
-			fmt.Fprintf(out, "其余 %d 个地址未显示", total)
+			fmt.Fprintf(out, "\n其余 %d 个地址未显示", total)
 		}
 	} else if total > index {
 		fmt.Fprintf(out, "\n… 本组其余 %d 个地址未显示", total-index)

@@ -207,6 +207,23 @@ func TestDNSReportUsesCompactLineSpacing(t *testing.T) {
 	}
 }
 
+func TestDNSDetailsHaveExplicitSectionBreaks(t *testing.T) {
+	var out strings.Builder
+	shown := 0
+	appendDNSGroupDetails(&out, lookup.DNSGroupResult{
+		Provider: "dns.alidns.com",
+		A:        []string{"108.157.254.58"},
+	}, map[string]lookup.GeoIPInfo{
+		"108.157.254.58": {IP: "108.157.254.58", CountryCode: "SG", Country: "Singapore"},
+	}, &shown)
+	text := out.String()
+	for _, want := range []string{"状态：主端点\n\n解析记录：\n1. A", "IP：108.157.254.58", "🇸🇬 Singapore（新加坡）"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("DNS details missing explicit break %q: %q", want, text)
+		}
+	}
+}
+
 func TestGeoSuggestionColorsOnlyRoutingKeywords(t *testing.T) {
 	proxyText, proxyKind := geoSuggestion(lookup.Report{ChinaChecked: 1, GeoIPs: []lookup.GeoIPInfo{{IP: "8.8.8.8", CountryCode: "US"}}})
 	if proxyKind != "proxy" || !strings.Contains(proxyText, "🔴 代理") || strings.Contains(proxyText, "🟢") {
