@@ -138,3 +138,32 @@ func TestAdvancedSuggestions(t *testing.T) {
 		t.Fatalf("regex suggestion=%q", got)
 	}
 }
+
+func TestRemovalConfirmationListsEveryAffectedRule(t *testing.T) {
+	store := rules.Store{Rules: []rules.Rule{
+		{Domain: "example.com", Match: rules.Exact, Action: rules.Direct},
+		{Domain: "example.com", Match: rules.Suffix, Action: rules.Proxy},
+		{Domain: "other.example", Match: rules.Exact, Action: rules.Direct},
+	}}
+	matched := rulesForDomain(store, "example.com")
+	if len(matched) != 2 {
+		t.Fatalf("expected 2 affected rules, got %d", len(matched))
+	}
+	text := removalConfirmationText("example.com", matched)
+	for _, want := range []string{"删除规则确认（第 2 步）", "DOMAIN,example.com", "DOMAIN-SUFFIX,example.com", "不可在 Bot 中直接撤销"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in confirmation: %s", want, text)
+		}
+	}
+}
+
+func TestSameRuleSetDetectsConfirmationRace(t *testing.T) {
+	original := []rules.Rule{{Domain: "example.com", Match: rules.Exact, Action: rules.Direct}}
+	if !sameRuleSet(original, append([]rules.Rule(nil), original...)) {
+		t.Fatal("identical snapshots should match")
+	}
+	changed := []rules.Rule{{Domain: "example.com", Match: rules.Exact, Action: rules.Proxy}}
+	if sameRuleSet(original, changed) {
+		t.Fatal("group change between preview and confirmation must be detected")
+	}
+}

@@ -10,6 +10,7 @@
 - 上游代理/直连规则可通过 Telegram 双向覆写为个人规则。
 - Telegram 私聊白名单默认只有 `538031590`。
 - 添加规则时智能选择精确域名、当前域名及下级或安全主域名；高级菜单支持关键词、通配符和正则，冲突时二次确认移动。
+- 删除个人规则和将已有规则在直连/代理分组之间移动时，Bot 会先列出受影响规则并要求二次确认；重复点击不会重复提交。
 - GitHub Trees API 或 GitLab Commits API 原子提交，避免多文件半更新。
 
 外部服务协议优先使用成熟开源库：Telegram 使用 `go-telegram/bot`，GitHub 使用 `google/go-github`，GitLab 使用官方 `api/client-go`，YAML 使用 `goccy/go-yaml`，GeoIP HTTPS 使用你的 `jwwsjlm/req/v3`，其他下载重试使用 `go-retryablehttp`。完整版本和许可证见 [docs/open-source-dependencies.md](docs/open-source-dependencies.md)。

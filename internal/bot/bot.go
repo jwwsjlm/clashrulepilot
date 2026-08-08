@@ -39,6 +39,7 @@ type pending struct {
 	AwaitingPattern bool
 	Busy            bool
 	Candidates      []string
+	DeleteRules     []rules.Rule
 }
 
 type button struct {
@@ -173,7 +174,6 @@ func (b *Bot) handlePendingText(ctx context.Context, chatID int64, text string) 
 	if err != nil {
 		if p.Mode == "remove" {
 			value := strings.TrimSpace(text)
-			b.clear(chatID)
 			b.removeDomain(ctx, chatID, value)
 			return true
 		}
@@ -210,7 +210,6 @@ func (b *Bot) acceptDomain(ctx context.Context, chatID int64, p *pending, domain
 		b.clear(chatID)
 		b.query(ctx, chatID, domainName)
 	case "remove":
-		b.clear(chatID)
 		b.removeDomain(ctx, chatID, domainName)
 	}
 }
@@ -302,8 +301,8 @@ func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pendin
 	result, err := b.service.AddRule(ctx, toRule(p, userID), force)
 	if conflict, ok := err.(*app.ConflictError); ok {
 		b.setBusy(chatID, false)
-		b.send(ctx, chatID, fmt.Sprintf("发现同类型规则：\n%s,%s\n当前动作：%s\n目标动作：%s\n\n是否移动到新的动作？", rules.Token(conflict.Existing), strings.ToUpper(string(conflict.Existing.Action)), actionText(conflict.Existing.Action), actionText(p.Action)), keyboard([][]button{
-			{{Text: "确认移动", Data: "confirm:yes"}, {Text: "取消", Data: "nav:cancel"}},
+		b.send(ctx, chatID, fmt.Sprintf("⚠️ 更改域名分组确认（第 2 步）\n\n规则：%s\n当前分组：%s\n目标分组：%s\n\n确认后会移动现有规则并生成新的 Git commit。OpenClash 下次更新远程覆写后将使用新分组。", rules.Token(conflict.Existing), actionText(conflict.Existing.Action), actionText(p.Action)), keyboard([][]button{
+			{{Text: "⚠️ 确认更改分组", Data: "confirm:yes"}, {Text: "取消", Data: "nav:cancel"}},
 		}))
 		return
 	}
@@ -514,6 +513,9 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 	case "confirm:yes":
 		b.commitPending(ctx, chatID, query.From.ID, pendingRule, true)
 		return
+	case "remove:confirm":
+		b.confirmRemoval(ctx, chatID, pendingRule)
+		return
 	default:
 		log.Printf("telegram callback ignored: unknown data=%q", query.Data)
 		b.send(ctx, chatID, "无法识别这个按钮，请返回主菜单。", homeMenu())
@@ -547,12 +549,97 @@ func (b *Bot) remove(ctx context.Context, chatID int64, parts []string) {
 }
 
 func (b *Bot) removeDomain(ctx context.Context, chatID int64, domainName string) {
-	result, err := b.service.RemoveRule(ctx, domainName, nil)
+	store, err := b.service.LoadStore(ctx)
+	if err != nil {
+		b.clear(chatID)
+		b.send(ctx, chatID, "读取待删除规则失败："+err.Error(), homeMenu())
+		return
+	}
+	matched := rulesForDomain(store, domainName)
+	if len(matched) == 0 {
+		b.clear(chatID)
+		b.send(ctx, chatID, "删除失败：未找到该域名对应的个人规则。", homeMenu())
+		return
+	}
+	b.mu.Lock()
+	b.sessions[chatID] = &pending{Mode: "remove_confirm", Domain: domainName, OriginalDomain: domainName, DeleteRules: matched}
+	b.mu.Unlock()
+	b.send(ctx, chatID, removalConfirmationText(domainName, matched), keyboard([][]button{
+		{{Text: "⚠️ 确认删除", Data: "remove:confirm"}, {Text: "取消", Data: "nav:cancel"}},
+	}))
+}
+
+func (b *Bot) confirmRemoval(ctx context.Context, chatID int64, p *pending) {
+	if p.Mode != "remove_confirm" || p.Domain == "" || len(p.DeleteRules) == 0 {
+		b.send(ctx, chatID, "删除确认已过期，请重新开始。", homeMenu())
+		return
+	}
+	if !b.markBusy(chatID) {
+		b.send(ctx, chatID, "⏳ 删除操作正在处理中，请勿重复点击。", homeMenu())
+		return
+	}
+	store, err := b.service.LoadStore(ctx)
+	if err != nil {
+		b.setBusy(chatID, false)
+		b.send(ctx, chatID, "确认删除前读取规则失败："+err.Error(), homeMenu())
+		return
+	}
+	current := rulesForDomain(store, p.Domain)
+	if !sameRuleSet(current, p.DeleteRules) {
+		b.setBusy(chatID, false)
+		if len(current) == 0 {
+			b.clear(chatID)
+			b.send(ctx, chatID, "规则已经不存在，无需再次删除。", homeMenu())
+			return
+		}
+		p.DeleteRules = current
+		b.send(ctx, chatID, "⚠️ 待删除规则在确认期间发生了变化，请重新核对：\n\n"+removalConfirmationText(p.Domain, current), keyboard([][]button{
+			{{Text: "⚠️ 再次确认删除", Data: "remove:confirm"}, {Text: "取消", Data: "nav:cancel"}},
+		}))
+		return
+	}
+	b.send(ctx, chatID, fmt.Sprintf("⏳ 已确认删除 %d 条规则，正在提交到%s，请稍候……", len(current), repoProviderText(b.cfg.RuleRepoProvider)), nil)
+	result, err := b.service.RemoveRule(ctx, p.Domain, nil)
+	b.clear(chatID)
 	if err != nil {
 		b.send(ctx, chatID, "删除失败："+err.Error(), homeMenu())
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("已删除 %d 条规则，commit=%s", result.Changed, short(result.Commit)), homeMenu())
+	b.send(ctx, chatID, fmt.Sprintf("✅ 删除完成\n域名：%s\n删除规则：%d 条\ncommit：%s", p.Domain, result.Changed, short(result.Commit)), homeMenu())
+}
+
+func rulesForDomain(store rules.Store, domainName string) []rules.Rule {
+	var matched []rules.Rule
+	for _, rule := range store.Rules {
+		if rule.Domain == domainName {
+			matched = append(matched, rule)
+		}
+	}
+	return rules.Ordered(matched)
+}
+
+func sameRuleSet(a, b []rules.Rule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	a = rules.Ordered(append([]rules.Rule(nil), a...))
+	b = rules.Ordered(append([]rules.Rule(nil), b...))
+	for index := range a {
+		if a[index].Domain != b[index].Domain || a[index].Match != b[index].Match || a[index].Action != b[index].Action {
+			return false
+		}
+	}
+	return true
+}
+
+func removalConfirmationText(domainName string, matched []rules.Rule) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "⚠️ 删除规则确认（第 2 步）\n\n域名：%s\n将删除 %d 条个人规则：", domainName, len(matched))
+	for index, rule := range matched {
+		fmt.Fprintf(&out, "\n%d. %s → %s", index+1, rules.Token(rule), actionText(rule.Action))
+	}
+	out.WriteString("\n\n删除后会生成新的 Git commit；OpenClash 下次更新远程覆写后不再应用这些规则。此操作不可在 Bot 中直接撤销。")
+	return out.String()
 }
 
 func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
