@@ -710,12 +710,12 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	if root == "" {
 		root = "未识别"
 	}
-	text := fmt.Sprintf("🔍 查询域名\n%s\n\n👤 个人规则\n%s\n\n📚 Aethersailor\n%s\n\n🇨🇳 GEOSITE:CN\n%s\n\n🧱 GEOSITE:GFW\n%s\n\n%s\n\n可注册域名：%s\n\n📡 中国大陆信号：%s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), dnsText, root, chinaSignal)
+	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n🧱 GEOSITE:GFW：%s\n\n%s\n可注册域名：%s\n📡 中国大陆信号：%s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), dnsText, root, chinaSignal)
 	if geoText != "" {
-		text += "\n\n" + geoText
+		text += "\n" + geoText
 	}
 	if suggestion != "" {
-		text += "\n\n" + suggestion
+		text += "\n" + suggestion
 	}
 	rows := [][]button{}
 	if hasProxy {
@@ -1040,11 +1040,11 @@ func (b *Bot) sendDNSDetails(ctx context.Context, chatID int64, data string) {
 	fmt.Fprintf(&out, "📍 DNS/IP 详细结果\n查询域名：%s", domainName)
 	shown := 0
 	if data == "dns:details:domestic" || data == "dns:details:all" {
-		out.WriteString("\n\n🇨🇳 国内 DNS\n")
+		out.WriteString("\n🇨🇳 国内 DNS\n")
 		appendDNSGroupDetails(&out, result.Network.Domestic, geo, &shown)
 	}
 	if data == "dns:details:foreign" || data == "dns:details:all" {
-		out.WriteString("\n\n🌍 国外 DNS\n")
+		out.WriteString("\n🌍 国外 DNS\n")
 		appendDNSGroupDetails(&out, result.Network.Foreign, geo, &shown)
 	}
 	b.send(ctx, chatID, out.String(), homeMenu())
@@ -1110,11 +1110,11 @@ func formatDNSReport(report lookup.Report) string {
 	} else {
 		fmt.Fprintf(&out, "\n本地 DNS：A %d · AAAA %d", len(report.LocalA), len(report.LocalAAAA))
 	}
-	out.WriteString("\n\n🇨🇳 国内 DNS\n")
+	out.WriteString("\n🇨🇳 国内 DNS\n")
 	out.WriteString(formatDNSGroupSummary(report.Domestic, "国内 DNS"))
-	out.WriteString("\n\n🌍 国外 DNS\n")
+	out.WriteString("\n🌍 国外 DNS\n")
 	out.WriteString(formatDNSGroupSummary(report.Foreign, "国外 DNS"))
-	fmt.Fprintf(&out, "\n\n合计真实地址：A %d · AAAA %d", len(report.A), len(report.AAAA))
+	fmt.Fprintf(&out, "\n合计真实地址：A %d · AAAA %d", len(report.A), len(report.AAAA))
 	return out.String()
 }
 

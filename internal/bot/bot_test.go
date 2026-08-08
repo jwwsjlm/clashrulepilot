@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"clashrulepilot/internal/lookup"
 	"clashrulepilot/internal/rules"
 )
 
@@ -165,5 +166,18 @@ func TestSameRuleSetDetectsConfirmationRace(t *testing.T) {
 	changed := []rules.Rule{{Domain: "example.com", Match: rules.Exact, Action: rules.Proxy}}
 	if sameRuleSet(original, changed) {
 		t.Fatal("group change between preview and confirmation must be detected")
+	}
+}
+
+func TestDNSReportUsesCompactLineSpacing(t *testing.T) {
+	text := formatDNSReport(lookup.Report{
+		LocalA:   []string{"198.18.0.1"},
+		FakeIP:   []string{"198.18.0.1"},
+		Domestic: lookup.DNSGroupResult{Group: "domestic", Provider: "dns.alidns.com", A: []string{"1.1.1.1"}},
+		Foreign:  lookup.DNSGroupResult{Group: "foreign", Provider: "cloudflare-dns.com", A: []string{"8.8.8.8"}},
+		A:        []string{"1.1.1.1", "8.8.8.8"},
+	})
+	if strings.Contains(text, "\n\n") {
+		t.Fatalf("DNS summary contains extra blank lines: %q", text)
 	}
 }
