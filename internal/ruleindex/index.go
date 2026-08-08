@@ -25,10 +25,12 @@ import (
 type Action string
 
 const (
-	Direct   Action = "direct"
-	Proxy    Action = "proxy"
-	Category Action = "category"
-	GeoSite  Action = "geosite-cn"
+	Direct     Action = "direct"
+	Proxy      Action = "proxy"
+	Category   Action = "category"
+	GeoSiteCN  Action = "geosite-cn"
+	GeoSiteGFW Action = "geosite-gfw"
+	GeoSite           = GeoSiteCN // backward-compatible name for GEOSITE:CN
 )
 
 type Entry struct {
@@ -53,6 +55,7 @@ type diskMetadata struct {
 	Proxy     int                   `json:"proxy"`
 	Category  int                   `json:"category"`
 	GeoSite   int                   `json:"geosite"`
+	GFW       int                   `json:"gfw"`
 }
 
 type Status struct {
@@ -64,6 +67,7 @@ type Status struct {
 	Proxy     int
 	Category  int
 	GeoSite   int
+	GFW       int
 	LastError string
 }
 
@@ -78,6 +82,7 @@ type Manager struct {
 	upstreamRepo string
 	branch       string
 	geositeURL   string
+	gfwURL       string
 	http         *http.Client
 	github       *gh.Client
 	syncMu       sync.Mutex
@@ -117,6 +122,7 @@ func New(enabled bool, dataDir, repo, branch, token string) *Manager {
 	m := &Manager{
 		enabled: enabled, dataDir: dataDir, upstreamRepo: repo, branch: branch,
 		geositeURL: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/classical/cn.yaml",
+		gfwURL:     "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/classical/gfw.yaml",
 		http:       httpClient, github: githubClient,
 	}
 	m.status.Enabled = enabled
@@ -359,7 +365,10 @@ func (m *Manager) discoverSources(ctx context.Context) ([]source, error) {
 	if len(sources) == 0 {
 		return nil, fmt.Errorf("no *_Domain.yaml files found in upstream rule directory")
 	}
-	sources = append(sources, source{name: "GEOSITE_CN.yaml", url: m.geositeURL, action: GeoSite})
+	sources = append(sources,
+		source{name: "GEOSITE_CN.yaml", url: m.geositeURL, action: GeoSiteCN},
+		source{name: "GEOSITE_GFW.yaml", url: m.gfwURL, action: GeoSiteGFW},
+	)
 	sort.Slice(sources, func(i, j int) bool { return sources[i].name < sources[j].name })
 	return sources, nil
 }
@@ -438,8 +447,10 @@ func buildDatabase(path, sourceDir string, sources []source, metadata diskMetada
 				metadata.Proxy++
 			case Category:
 				metadata.Category++
-			case GeoSite:
+			case GeoSiteCN:
 				metadata.GeoSite++
+			case GeoSiteGFW:
+				metadata.GFW++
 			}
 		}
 	}
@@ -668,7 +679,7 @@ func sortMatches(out []Match) {
 func (m *Manager) installStatus(metadata diskMetadata) {
 	status := Status{
 		Enabled: true, Loaded: true, UpdatedAt: metadata.UpdatedAt, Sources: len(metadata.Sources),
-		Direct: metadata.Direct, Proxy: metadata.Proxy, Category: metadata.Category, GeoSite: metadata.GeoSite,
+		Direct: metadata.Direct, Proxy: metadata.Proxy, Category: metadata.Category, GeoSite: metadata.GeoSite, GFW: metadata.GFW,
 	}
 	m.statusMu.Lock()
 	status.LastError = m.status.LastError

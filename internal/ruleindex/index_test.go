@@ -27,8 +27,12 @@ func TestParseAndQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := testManagerWithEntries(t, append(direct, geo...))
-	cases := map[string]Action{"exact.example.com": Direct, "sub.example.org": Direct, "foo-m-team.net": Direct, "www.cn.example": GeoSite}
+	gfw, err := parseClassical([]byte("payload:\n  - DOMAIN-SUFFIX,linux.do\n"), GeoSiteGFW, "gfw.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := testManagerWithEntries(t, append(append(direct, geo...), gfw...))
+	cases := map[string]Action{"exact.example.com": Direct, "sub.example.org": Direct, "foo-m-team.net": Direct, "www.cn.example": GeoSite, "linux.do": GeoSiteGFW}
 	for domain, action := range cases {
 		got := m.Query(domain)
 		if len(got) == 0 || got[0].Action != action {
@@ -70,6 +74,8 @@ func TestSyncRebuildsFromLatestRemoteFileList(t *testing.T) {
 			_, _ = fmt.Fprint(w, "payload:\n  - '+.dns.example'\n")
 		case "/raw/geosite":
 			_, _ = fmt.Fprint(w, "payload:\n  - DOMAIN-SUFFIX,cn.example\n")
+		case "/raw/gfw":
+			_, _ = fmt.Fprint(w, "payload:\n  - DOMAIN-SUFFIX,linux.do\n")
 		default:
 			http.NotFound(w, r)
 		}
@@ -84,6 +90,7 @@ func TestSyncRebuildsFromLatestRemoteFileList(t *testing.T) {
 	m.github = api
 	m.http = server.Client()
 	m.geositeURL = server.URL + "/raw/geosite"
+	m.gfwURL = server.URL + "/raw/gfw"
 
 	changed, err := m.Sync(context.Background())
 	if err != nil || !changed {
@@ -104,7 +111,7 @@ func TestSyncRebuildsFromLatestRemoteFileList(t *testing.T) {
 		t.Fatalf("direct rule missing after rebuild: %#v", got)
 	}
 	status := m.Status()
-	if status.Sources != 2 { // current direct file + GEOSITE:CN
+	if status.Sources != 3 { // current direct file + GEOSITE:CN + GEOSITE:GFW
 		t.Fatalf("unexpected source count: %+v", status)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "upstream", "Encrypted_DNS_Domain.yaml")); !os.IsNotExist(err) {
@@ -169,6 +176,9 @@ func TestLiveIndexSync(t *testing.T) {
 	}
 	if got := m.Query("www.baidu.com"); len(got) == 0 {
 		t.Fatal("expected www.baidu.com to match GEOSITE:CN")
+	}
+	if got := m.Query("linux.do"); len(got) == 0 || got[0].Action != GeoSiteGFW {
+		t.Fatal("expected linux.do to match GEOSITE:GFW")
 	}
 }
 

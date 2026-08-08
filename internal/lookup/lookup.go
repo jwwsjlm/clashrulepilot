@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ type Report struct {
 	ChinaChecked int
 	DNSError     string
 	GeoError     string
+	FakeIP       []string
 }
 
 type geoCacheEntry struct {
@@ -47,14 +49,17 @@ func New(apiURL string) *Inspector {
 }
 
 func (i *Inspector) Inspect(ctx context.Context, name string) Report {
-	r := Report{Registrable: domain.Registrable(name)}
 	lookupCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 	addrs, err := i.resolver.LookupIPAddr(lookupCtx, name)
 	if err != nil {
-		r.DNSError = err.Error()
-		return r
+		return Report{Registrable: domain.Registrable(name), DNSError: err.Error()}
 	}
+	return i.inspectAddresses(ctx, name, addrs)
+}
+
+func (i *Inspector) inspectAddresses(ctx context.Context, name string, addrs []net.IPAddr) Report {
+	r := Report{Registrable: domain.Registrable(name)}
 	var ips []string
 	seen := map[string]bool{}
 	for _, addr := range addrs {
@@ -63,12 +68,16 @@ func (i *Inspector) Inspect(ctx context.Context, name string) Report {
 			continue
 		}
 		seen[ip] = true
-		ips = append(ips, ip)
 		if addr.IP.To4() != nil {
 			r.A = append(r.A, ip)
 		} else {
 			r.AAAA = append(r.AAAA, ip)
 		}
+		if isFakeIP(ip) {
+			r.FakeIP = append(r.FakeIP, ip)
+			continue
+		}
+		ips = append(ips, ip)
 	}
 	if len(ips) > 8 {
 		ips = ips[:8]
@@ -103,6 +112,24 @@ func (i *Inspector) Inspect(ctx context.Context, name string) Report {
 		r.GeoError = errors[0]
 	}
 	return r
+}
+
+var fakeIPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("fdfe:dcba:9876::/64"),
+}
+
+func isFakeIP(value string) bool {
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return false
+	}
+	for _, prefix := range fakeIPPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func (i *Inspector) isChina(ctx context.Context, ip string) (bool, error) {

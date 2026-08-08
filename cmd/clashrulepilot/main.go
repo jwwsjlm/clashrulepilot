@@ -89,7 +89,7 @@ func main() {
 				log.Printf("initial upstream sync committed %s", result.Commit)
 			} else {
 				status := service.IndexStatus()
-				log.Printf("initial upstream index sync complete changed=%t sources=%d direct=%d proxy=%d category=%d geosite=%d", result.IndexChanged, status.Sources, status.Direct, status.Proxy, status.Category, status.GeoSite)
+				log.Printf("initial upstream index sync complete changed=%t sources=%d direct=%d proxy=%d category=%d geosite_cn=%d geosite_gfw=%d", result.IndexChanged, status.Sources, status.Direct, status.Proxy, status.Category, status.GeoSite, status.GFW)
 			}
 		}()
 	}

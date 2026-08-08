@@ -4,9 +4,9 @@
 
 ## 功能
 
-- 定时列出 `Aethersailor/Custom_OpenClash_Rules/rule`，只下载当前的 `*_Domain.yaml` 与 GEOSITE:CN 并建立本地查询索引；不拉取整个仓库、`.mrs`、IP 或端口规则。
+- 定时列出 `Aethersailor/Custom_OpenClash_Rules/rule`，只下载当前的 `*_Domain.yaml`，并额外下载 GEOSITE:CN、GEOSITE:GFW 建立本地查询索引；不拉取整个仓库、`.mrs`、IP 或端口规则。
 - 支持从域名、URL、`host:port` 和完整 OpenClash/Mihomo 日志智能提取目标域名。
-- 查询个人规则、Aethersailor、GEOSITE:CN、DNS 和大陆 IP 信号。
+- 查询个人规则、Aethersailor、GEOSITE:CN、GEOSITE:GFW、DNS 和大陆 IP 信号。
 - 上游代理/直连规则可通过 Telegram 双向覆写为个人规则。
 - Telegram 私聊白名单默认只有 `538031590`。
 - 添加规则时选择直连/代理、精确域名/包含子域名；冲突时二次确认移动。
@@ -78,7 +78,9 @@ DATA_DIR=/app/data
 GEOIP_API_URL=https://ipwho.is/{ip}
 ```
 
-`SYNC_UPSTREAM=false` 只表示不向个人公开仓库镜像 Aethersailor 文件；本地查询索引仍会按 `SYNC_CRON` 更新。每轮同步都以远端当前文件清单完整重建索引，远端已删除或改名的文件会从新索引消失。原始域名规则落地到宿主机 `./data/upstream/`，查询索引保存为 `./data/upstream-index.db`。查询通过 bbolt 按需读取磁盘，不再把完整规则树常驻 Go 堆内存；同步失败时继续使用上一次完整成功数据库。
+`SYNC_UPSTREAM=false` 只表示不向个人公开仓库镜像 Aethersailor 文件；本地查询索引仍会按 `SYNC_CRON` 更新。每轮同步都以远端当前文件清单完整重建索引，远端已删除或改名的文件会从新索引消失。原始域名规则、`GEOSITE_CN.yaml` 和 `GEOSITE_GFW.yaml` 落地到宿主机 `./data/upstream/`，查询索引保存为 `./data/upstream-index.db`。查询通过 bbolt 按需读取磁盘，不再把完整规则树常驻 Go 堆内存；同步失败时继续使用上一次完整成功数据库。
+
+如果 OpenClash/Mihomo 使用 `fake-ip` DNS 模式，容器查询可能得到 `198.18.0.0/15` 或 `fdfe:dcba:9876::/64` 中的合成地址。程序会把它标记为 Fake-IP，并跳过公网 GeoIP 请求，避免把“保留地址被 GeoIP 服务拒绝”误报为查询失败。
 
 ## OpenClash 接入
 

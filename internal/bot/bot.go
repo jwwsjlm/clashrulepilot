@@ -409,12 +409,17 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 		personal = strings.Join(values, "；")
 	}
 	var upstreamText []string
-	var geositeText []string
+	var geositeText, gfwText []string
 	hasDirect, hasProxy := false, false
 	const maxDisplayedMatches = 20
 	for _, match := range result.Upstream {
-		if match.Action == ruleindex.GeoSite {
+		if match.Action == ruleindex.GeoSiteCN {
 			geositeText = append(geositeText, fmt.Sprintf("命中 · %s · %s · 来源 %s", match.Kind, match.Pattern, match.Source))
+			continue
+		}
+		if match.Action == ruleindex.GeoSiteGFW {
+			gfwText = append(gfwText, fmt.Sprintf("命中 · %s · %s · 来源 %s", match.Kind, match.Pattern, match.Source))
+			hasProxy = true
 			continue
 		}
 		if match.Action == ruleindex.Direct {
@@ -439,13 +444,21 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	if len(geositeText) == 0 {
 		geositeText = []string{"未找到"}
 	}
+	if len(gfwText) == 0 {
+		gfwText = []string{"未找到"}
+	}
 	chinaSignal := "未检测到"
-	if result.Network.GeoError != "" {
-		chinaSignal = "检测失败"
+	if len(result.Network.FakeIP) > 0 && result.Network.ChinaChecked == 0 && result.Network.GeoError == "" {
+		chinaSignal = "无法判断（DNS 返回 Fake-IP）"
+	} else if result.Network.GeoError != "" {
+		chinaSignal = "检测失败（" + result.Network.GeoError + "）"
 	} else if result.Network.China {
 		chinaSignal = fmt.Sprintf("检测到（%d 个地址已检查）", result.Network.ChinaChecked)
 	}
 	dnsText := fmt.Sprintf("A %d · AAAA %d", len(result.Network.A), len(result.Network.AAAA))
+	if len(result.Network.FakeIP) > 0 {
+		dnsText += fmt.Sprintf(" · Fake-IP %d", len(result.Network.FakeIP))
+	}
 	if result.Network.DNSError != "" {
 		dnsText = "解析失败"
 	}
@@ -453,7 +466,7 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	if root == "" {
 		root = "未识别"
 	}
-	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n📡 中国大陆信号：%s\n🌐 DNS 解析：%s · 可注册域名 %s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), chinaSignal, dnsText, root)
+	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n🧱 GEOSITE:GFW：%s\n📡 中国大陆信号：%s\n🌐 DNS 解析：%s · 可注册域名 %s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), chinaSignal, dnsText, root)
 	rows := [][]button{}
 	if hasProxy {
 		rows = append(rows, []button{{Text: "🎯 覆写为个人直连", Data: "override:direct"}})
@@ -497,7 +510,7 @@ func (b *Bot) sync(ctx context.Context, chatID int64) {
 		b.send(ctx, chatID, "本地查询索引和上游镜像都已关闭。", homeMenu())
 		return
 	}
-	b.send(ctx, chatID, "正在同步 Aethersailor 与 GEOSITE:CN 本地索引，请稍候…", nil)
+	b.send(ctx, chatID, "正在同步 Aethersailor、GEOSITE:CN 与 GEOSITE:GFW 本地索引，请稍候…", nil)
 	result, err := b.service.Sync(ctx)
 	if err != nil {
 		b.send(ctx, chatID, "同步失败："+err.Error(), homeMenu())
@@ -528,7 +541,7 @@ func (b *Bot) status(ctx context.Context, chatID int64) {
 	if idx.LastError != "" {
 		lastError = idx.LastError
 	}
-	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d\n索引更新时间：%s\n索引异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, updated, lastError, b.service.SyncEnabled()), homeMenu())
+	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, b.service.SyncEnabled()), homeMenu())
 }
 
 func (b *Bot) helpText() string {
