@@ -487,11 +487,11 @@ func TestProxySuggestionButtonIsMarkedRecommended(t *testing.T) {
 	}
 }
 
-func TestQueryUsesActivePromptMessageAsEditTarget(t *testing.T) {
+func TestTypedQueryStartsFreshResponseMessage(t *testing.T) {
 	p := &pending{Mode: "query", ActiveMessageID: 1234}
 	target := queryMessageTarget(p, nil)
-	if target == nil || target.ID != 1234 {
-		t.Fatalf("query should edit the active prompt message: %#v", target)
+	if target != nil {
+		t.Fatalf("typed query should not edit the old prompt message: %#v", target)
 	}
 	existing := &models.Message{ID: 5678}
 	if got := queryMessageTarget(p, existing); got != existing {

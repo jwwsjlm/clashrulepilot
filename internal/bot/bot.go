@@ -243,11 +243,10 @@ func (b *Bot) acceptDomainTarget(ctx context.Context, chatID int64, p *pending, 
 	}
 }
 
-func queryMessageTarget(p *pending, target *models.Message) *models.Message {
-	if target != nil || p == nil || p.ActiveMessageID <= 0 {
-		return target
-	}
-	return &models.Message{ID: p.ActiveMessageID}
+func queryMessageTarget(_ *pending, target *models.Message) *models.Message {
+	// A domain typed by the user must start a fresh response below that input.
+	// Callback-driven flows can still reuse their explicit message target.
+	return target
 }
 
 func (b *Bot) showMatchMenu(ctx context.Context, chatID int64, p *pending) {
@@ -756,9 +755,7 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 }
 
 func (b *Bot) queryTarget(ctx context.Context, chatID int64, domainName string, target *models.Message) {
-	if target != nil {
-		b.sendTargetModeEntities(ctx, chatID, target, "⏳ 正在查询："+domainName+"\n正在检查个人规则、上游规则、DNS 与 IP 归属，请稍候……", nil, nil, false)
-	}
+	target = b.sendTargetModeEntities(ctx, chatID, target, "⏳ 正在查询："+domainName+"\n正在检查个人规则、上游规则、DNS 与 IP 归属，请稍候……", nil, nil, false)
 	result, err := b.service.Query(ctx, domainName)
 	if err != nil {
 		b.sendTargetModeEntities(ctx, chatID, target, "查询失败："+err.Error(), errorMenu(), nil, target == nil)
@@ -1283,7 +1280,7 @@ func (b *Bot) sendTargetMode(ctx context.Context, chatID int64, target *models.M
 	b.sendTargetModeEntities(ctx, chatID, target, text, kb, nil, push)
 }
 
-func (b *Bot) sendTargetModeEntities(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup, entities []models.MessageEntity, push bool) {
+func (b *Bot) sendTargetModeEntities(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup, entities []models.MessageEntity, push bool) *models.Message {
 	entities = addDomainCodeEntities(text, entities)
 	previewDisabled := true
 	preview := &models.LinkPreviewOptions{IsDisabled: &previewDisabled}
@@ -1291,7 +1288,7 @@ func (b *Bot) sendTargetModeEntities(ctx context.Context, chatID int64, target *
 		if _, err := b.api.EditMessageText(ctx, &tgbot.EditMessageTextParams{ChatID: chatID, MessageID: target.ID, Text: text, Entities: entities, LinkPreviewOptions: preview, ReplyMarkup: kb}); err == nil {
 			log.Printf("telegram message edited chat=%d message=%d", chatID, target.ID)
 			b.recordPage(chatID, target.ID, text, kb, entities, push)
-			return
+			return target
 		} else {
 			log.Printf("telegram edit failed chat=%d message=%d: %v; falling back to send", chatID, target.ID, err)
 		}
@@ -1299,12 +1296,13 @@ func (b *Bot) sendTargetModeEntities(ctx context.Context, chatID int64, target *
 	msg, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text, Entities: entities, LinkPreviewOptions: preview, ReplyMarkup: kb})
 	if err != nil {
 		log.Printf("telegram send: %v", err)
-		return
+		return nil
 	}
 	log.Printf("telegram message sent chat=%d", chatID)
 	if msg != nil {
 		b.recordPage(chatID, msg.ID, text, kb, entities, push)
 	}
+	return msg
 }
 
 func addDomainCodeEntities(text string, existing []models.MessageEntity) []models.MessageEntity {
