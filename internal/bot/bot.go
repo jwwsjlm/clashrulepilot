@@ -22,7 +22,6 @@ type Bot struct {
 	cfg      config.Config
 	api      *tgbot.Bot
 	sessions map[int64]*pending
-	removed  map[int64]bool
 	mu       sync.Mutex
 }
 
@@ -45,7 +44,6 @@ func New(service *app.Service, cfg config.Config) (*Bot, error) {
 		service:  service,
 		cfg:      cfg,
 		sessions: make(map[int64]*pending),
-		removed:  make(map[int64]bool),
 	}
 	api, err := tgbot.New(cfg.TelegramToken,
 		tgbot.WithDefaultHandler(b.handle),
@@ -92,7 +90,6 @@ func (b *Bot) handle(ctx context.Context, _ *tgbot.Bot, item *models.Update) {
 	}
 	text := strings.TrimSpace(item.Message.Text)
 	log.Printf("telegram message accepted update_id=%d from=%d chat=%d text=%q", item.ID, item.Message.From.ID, item.Message.Chat.ID, text)
-	b.ensureReplyKeyboardRemoved(ctx, item.Message.Chat.ID)
 	if b.handlePendingText(ctx, item.Message.Chat.ID, text) {
 		return
 	}
@@ -557,16 +554,6 @@ func (b *Bot) repo(ctx context.Context, chatID int64) {
 }
 
 func (b *Bot) clear(id int64) { b.mu.Lock(); delete(b.sessions, id); b.mu.Unlock() }
-func (b *Bot) ensureReplyKeyboardRemoved(ctx context.Context, chatID int64) {
-	b.mu.Lock()
-	if b.removed[chatID] {
-		b.mu.Unlock()
-		return
-	}
-	b.removed[chatID] = true
-	b.mu.Unlock()
-	b.send(ctx, chatID, "✅ 已切换为聊天消息内按钮。", &models.ReplyKeyboardRemove{RemoveKeyboard: true})
-}
 func (b *Bot) markBusy(id int64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -50,7 +50,7 @@ func TestMainMenuUsesInlineKeyboard(t *testing.T) {
 }
 
 func TestBusyGuardRejectsRepeatedAction(t *testing.T) {
-	b := &Bot{sessions: map[int64]*pending{7: {Mode: "add"}}, removed: map[int64]bool{}}
+	b := &Bot{sessions: map[int64]*pending{7: {Mode: "add"}}}
 	if !b.markBusy(7) {
 		t.Fatal("first action should acquire busy guard")
 	}
