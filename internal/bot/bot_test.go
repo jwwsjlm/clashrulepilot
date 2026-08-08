@@ -95,6 +95,29 @@ func TestSmartMatchMenuForSubdomain(t *testing.T) {
 			t.Fatalf("missing callback %s", callback)
 		}
 	}
+	labels := make([]string, 0)
+	for _, row := range menu.InlineKeyboard {
+		for _, item := range row {
+			labels = append(labels, item.Text)
+		}
+	}
+	for _, want := range []string{"🎯 仅当前域名", "🌿 当前域名及下级", "🌐 整个主域名", "🧰 高级匹配", "✖️ 取消"} {
+		found := false
+		for _, label := range labels {
+			if label == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing normalized button label %q: %#v", want, labels)
+		}
+	}
+	for _, banned := range []string{"⭐", "🌟"} {
+		if strings.Contains(text, banned) {
+			t.Fatalf("legacy inconsistent icon %q remains in match menu: %s", banned, text)
+		}
+	}
 }
 
 func TestSmartMatchMenuForRootHasNoDuplicateRootButton(t *testing.T) {

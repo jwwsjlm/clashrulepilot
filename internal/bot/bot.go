@@ -128,7 +128,7 @@ func (b *Bot) handle(ctx context.Context, _ *tgbot.Bot, item *models.Update) {
 				}
 				rows = append(rows, []button{{Text: candidate, Data: fmt.Sprintf("domain:pick:%d", n)}})
 			}
-			rows = append(rows, []button{{Text: "取消", Data: "nav:cancel"}})
+			rows = append(rows, []button{{Text: "✖️ 取消", Data: "nav:cancel"}})
 			b.send(ctx, item.Message.Chat.ID, "检测到多个域名，请选择：", keyboard(rows))
 		}
 	case "/remove":
@@ -191,7 +191,7 @@ func (b *Bot) handlePendingText(ctx context.Context, chatID int64, text string) 
 		for n, candidate := range candidates {
 			rows = append(rows, []button{{Text: candidate, Data: fmt.Sprintf("domain:pick:%d", n)}})
 		}
-		rows = append(rows, []button{{Text: "取消", Data: "nav:cancel"}})
+		rows = append(rows, []button{{Text: "✖️ 取消", Data: "nav:cancel"}})
 		b.send(ctx, chatID, "检测到多个域名，请选择需要处理的目标：", keyboard(rows))
 		return true
 	}
@@ -236,23 +236,23 @@ func matchMenuContent(p *pending) (string, *models.InlineKeyboardMarkup) {
 		fmt.Fprintf(&text, "\n安全主域名：%s", root)
 	}
 	fmt.Fprintf(&text, "\n\n🎯 仅当前域名\nDOMAIN,%s\n优点：范围最小，不会误伤其他子域名\n缺点：123.%s 不会命中", input, input)
-	rows := [][]button{{{Text: "🎯 仅 " + input, Data: "match:exact"}}}
+	rows := [][]button{{{Text: "🎯 仅当前域名", Data: "match:exact"}}}
 	if root == "" {
 		text.WriteString("\n\n⚠️ 无法安全识别可注册主域名，因此已隐藏后缀范围，避免覆盖公共或共享后缀。")
 	} else if root == input {
 		fmt.Fprintf(&text, "\n\n🌐 整个主域名（推荐）\nDOMAIN-SUFFIX,%s\n优点：匹配主域名和所有子域名\n缺点：www、api、cdn 等都会使用同一动作", input)
-		rows = append(rows, []button{{Text: "⭐ 整个 " + input, Data: "match:suffix"}})
+		rows = append(rows, []button{{Text: "🌐 整个主域名", Data: "match:suffix"}})
 	} else {
 		fmt.Fprintf(&text, "\n\n🌿 当前域名及下级（推荐）\nDOMAIN-SUFFIX,%s\n优点：覆盖当前域名和所有下级域名\n缺点：不会覆盖同主域名下的其他分支", input)
-		rows = append(rows, []button{{Text: "⭐ " + input + " + 下级", Data: "match:suffix"}})
+		rows = append(rows, []button{{Text: "🌿 当前域名及下级", Data: "match:suffix"}})
 		if root != "" {
 			fmt.Fprintf(&text, "\n\n🌐 整个主域名\nDOMAIN-SUFFIX,%s\n优点：一次覆盖整个网站\n缺点：所有子域名都会使用同一动作", root)
-			rows = append(rows, []button{{Text: "🌐 整个 " + root, Data: "match:root"}})
+			rows = append(rows, []button{{Text: "🌐 整个主域名", Data: "match:root"}})
 		}
 	}
 	rows = append(rows,
 		[]button{{Text: "🧰 高级匹配", Data: "match:advanced"}},
-		[]button{{Text: "取消", Data: "nav:cancel"}},
+		[]button{{Text: "✖️ 取消", Data: "nav:cancel"}},
 	)
 	return text.String(), keyboard(rows)
 }
@@ -260,14 +260,14 @@ func matchMenuContent(p *pending) (string, *models.InlineKeyboardMarkup) {
 func (b *Bot) showAdvancedMenu(ctx context.Context, chatID int64, p *pending) {
 	text := "🧰 高级域名匹配\n\n" +
 		"🔑 DOMAIN-KEYWORD\n包含关键词即命中；灵活但容易误匹配。\n\n" +
-		"🌟 DOMAIN-WILDCARD\n使用 * 和 ?；比关键词可控，但 *.example.com 通常不匹配根域名。\n\n" +
+		"✳️ DOMAIN-WILDCARD\n使用 * 和 ?；比关键词可控，但 *.example.com 通常不匹配根域名。\n\n" +
 		"🧩 DOMAIN-REGEX\n表达能力最强；最难维护且容易写错。\n\n" +
 		"常规域名优先使用上一页的 DOMAIN 或 DOMAIN-SUFFIX。"
 	b.send(ctx, chatID, text, keyboard([][]button{
 		{{Text: "🔑 关键词", Data: "advanced:keyword"}},
-		{{Text: "🌟 通配符", Data: "advanced:wildcard"}},
+		{{Text: "✳️ 通配符", Data: "advanced:wildcard"}},
 		{{Text: "🧩 正则表达式", Data: "advanced:regex"}},
-		{{Text: "⬅️ 返回范围选择", Data: "advanced:back"}, {Text: "取消", Data: "nav:cancel"}},
+		{{Text: "↩️ 返回范围选择", Data: "advanced:back"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 	}))
 }
 
@@ -276,7 +276,7 @@ func (b *Bot) showAdvancedOption(ctx context.Context, chatID int64, p *pending) 
 	text := fmt.Sprintf("%s\n\n建议值：\n%s\n\n优点：%s\n风险：%s\n\n你可以使用建议值，或者输入自定义内容。", name, p.AdvancedSuggest, benefit, risk)
 	b.send(ctx, chatID, text, keyboard([][]button{
 		{{Text: "✅ 使用建议", Data: "advanced:use"}, {Text: "✍️ 自定义输入", Data: "advanced:custom"}},
-		{{Text: "⬅️ 返回高级匹配", Data: "match:advanced"}, {Text: "取消", Data: "nav:cancel"}},
+		{{Text: "↩️ 返回高级匹配", Data: "match:advanced"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 	}))
 }
 
@@ -284,7 +284,7 @@ func (b *Bot) showAdvancedConfirmation(ctx context.Context, chatID int64, p *pen
 	name, _, risk := advancedDescription(p.Match)
 	text := fmt.Sprintf("⚠️ 请确认高级规则\n\n类型：%s\n准备提交：%s\n动作：%s\n\n风险：%s", name, rules.Token(toRule(p, 0)), actionText(p.Action), risk)
 	b.send(ctx, chatID, text, keyboard([][]button{
-		{{Text: "确认提交", Data: "advanced:confirm"}, {Text: "取消", Data: "nav:cancel"}},
+		{{Text: "✅ 确认提交", Data: "advanced:confirm"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 	}))
 }
 
@@ -302,7 +302,7 @@ func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pendin
 	if conflict, ok := err.(*app.ConflictError); ok {
 		b.setBusy(chatID, false)
 		b.send(ctx, chatID, fmt.Sprintf("⚠️ 更改域名分组确认（第 2 步）\n\n规则：%s\n当前分组：%s\n目标分组：%s\n\n确认后会移动现有规则并生成新的 Git commit。OpenClash 下次更新远程覆写后将使用新分组。", rules.Token(conflict.Existing), actionText(conflict.Existing.Action), actionText(p.Action)), keyboard([][]button{
-			{{Text: "⚠️ 确认更改分组", Data: "confirm:yes"}, {Text: "取消", Data: "nav:cancel"}},
+			{{Text: "🔄 确认更改分组", Data: "confirm:yes"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 		}))
 		return
 	}
@@ -361,8 +361,8 @@ func (b *Bot) addStart(ctx context.Context, chatID int64, parts []string) {
 	b.sessions[chatID] = &pending{Mode: "add", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
 	b.mu.Unlock()
 	b.send(ctx, chatID, "请选择规则动作：", keyboard([][]button{
-		{{Text: "直连", Data: "route:direct"}, {Text: "代理", Data: "route:proxy"}},
-		{{Text: "取消", Data: "nav:cancel"}},
+		{{Text: "🟢 直连", Data: "route:direct"}, {Text: "🔴 代理", Data: "route:proxy"}},
+		{{Text: "✖️ 取消", Data: "nav:cancel"}},
 	}))
 }
 
@@ -565,7 +565,7 @@ func (b *Bot) removeDomain(ctx context.Context, chatID int64, domainName string)
 	b.sessions[chatID] = &pending{Mode: "remove_confirm", Domain: domainName, OriginalDomain: domainName, DeleteRules: matched}
 	b.mu.Unlock()
 	b.send(ctx, chatID, removalConfirmationText(domainName, matched), keyboard([][]button{
-		{{Text: "⚠️ 确认删除", Data: "remove:confirm"}, {Text: "取消", Data: "nav:cancel"}},
+		{{Text: "🗑️ 确认删除", Data: "remove:confirm"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 	}))
 }
 
@@ -594,7 +594,7 @@ func (b *Bot) confirmRemoval(ctx context.Context, chatID int64, p *pending) {
 		}
 		p.DeleteRules = current
 		b.send(ctx, chatID, "⚠️ 待删除规则在确认期间发生了变化，请重新核对：\n\n"+removalConfirmationText(p.Domain, current), keyboard([][]button{
-			{{Text: "⚠️ 再次确认删除", Data: "remove:confirm"}, {Text: "取消", Data: "nav:cancel"}},
+			{{Text: "🗑️ 再次确认删除", Data: "remove:confirm"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 		}))
 		return
 	}
@@ -719,12 +719,12 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	}
 	rows := [][]button{}
 	if hasProxy {
-		rows = append(rows, []button{{Text: "🎯 覆写为个人直连", Data: "override:direct"}})
+		rows = append(rows, []button{{Text: "🟢 覆写为个人直连", Data: "override:direct"}})
 	}
 	if hasDirect {
-		rows = append(rows, []button{{Text: "🚀 覆写为个人代理", Data: "override:proxy"}})
+		rows = append(rows, []button{{Text: "🔴 覆写为个人代理", Data: "override:proxy"}})
 	}
-	rows = append(rows, []button{{Text: "🏠 返回主菜单", Data: "nav:home"}})
+	rows = append(rows, []button{{Text: "🏠 主菜单", Data: "nav:home"}})
 	if hasDirect || hasProxy {
 		b.mu.Lock()
 		b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
@@ -871,17 +871,17 @@ func keyboard(rows [][]button) *models.InlineKeyboardMarkup {
 }
 func mainMenu() *models.InlineKeyboardMarkup {
 	return keyboard([][]button{
-		{{Text: "🔍 查询域名", Data: "menu:query"}, {Text: "➕ 添加直连", Data: "menu:add:direct"}},
-		{{Text: "🚀 添加代理", Data: "menu:add:proxy"}, {Text: "➖ 删除规则", Data: "menu:remove"}},
+		{{Text: "🔍 查询域名", Data: "menu:query"}, {Text: "🟢 添加直连", Data: "menu:add:direct"}},
+		{{Text: "🔴 添加代理", Data: "menu:add:proxy"}, {Text: "🗑️ 删除规则", Data: "menu:remove"}},
 		{{Text: "📋 规则列表", Data: "menu:list"}, {Text: "📊 运行状态", Data: "menu:status"}},
 		{{Text: "🔗 规则仓库", Data: "menu:repo"}, {Text: "ℹ️ 使用帮助", Data: "menu:help"}},
 	})
 }
 func homeMenu() *models.InlineKeyboardMarkup {
-	return keyboard([][]button{{{Text: "🏠 返回主菜单", Data: "nav:home"}}})
+	return keyboard([][]button{{{Text: "🏠 主菜单", Data: "nav:home"}}})
 }
 func cancelMenu() *models.InlineKeyboardMarkup {
-	return keyboard([][]button{{{Text: "取消", Data: "nav:cancel"}, {Text: "🏠 主菜单", Data: "nav:home"}}})
+	return keyboard([][]button{{{Text: "✖️ 取消", Data: "nav:cancel"}, {Text: "🏠 主菜单", Data: "nav:home"}}})
 }
 func (b *Bot) send(ctx context.Context, chatID int64, text string, kb models.ReplyMarkup) {
 	_, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text, ReplyMarkup: kb})
@@ -910,22 +910,22 @@ func short(s string) string {
 
 func actionText(a rules.Action) string {
 	if a == rules.Direct {
-		return "直连"
+		return "🟢 直连"
 	}
-	return "代理"
+	return "🔴 代理"
 }
 func matchText(m rules.Match) string {
 	switch m {
 	case rules.Exact:
-		return "仅当前域名"
+		return "🎯 仅当前域名"
 	case rules.Suffix:
-		return "域名及下级"
+		return "🌿 域名及下级"
 	case rules.Keyword:
-		return "关键词"
+		return "🔑 关键词"
 	case rules.Wildcard:
-		return "通配符"
+		return "✳️ 通配符"
 	case rules.Regex:
-		return "正则表达式"
+		return "🧩 正则表达式"
 	default:
 		return "未知"
 	}
@@ -933,9 +933,9 @@ func matchText(m rules.Match) string {
 func indexActionText(a ruleindex.Action) string {
 	switch a {
 	case ruleindex.Direct:
-		return "直连"
+		return "🟢 直连"
 	case ruleindex.Proxy:
-		return "代理"
+		return "🔴 代理"
 	case ruleindex.Category:
 		return "分类"
 	default:
@@ -970,7 +970,7 @@ func advancedDescription(match rules.Match) (name, benefit, risk string) {
 	case rules.Keyword:
 		return "🔑 DOMAIN-KEYWORD", "域名结构变化时仍可按固定标识命中", "任何包含该字符串的无关域名也可能被匹配"
 	case rules.Wildcard:
-		return "🌟 DOMAIN-WILDCARD", "可以使用 * 和 ? 描述固定域名格式", "*.example.com 通常只覆盖子域名，不包含 example.com"
+		return "✳️ DOMAIN-WILDCARD", "可以使用 * 和 ? 描述固定域名格式", "*.example.com 通常只覆盖子域名，不包含 example.com"
 	case rules.Regex:
 		return "🧩 DOMAIN-REGEX", "可以表达复杂的域名模式", "最难维护；表达式过宽会误匹配，错误表达式无法提交"
 	default:
