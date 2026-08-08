@@ -254,22 +254,22 @@ func matchMenuContent(p *pending) (string, *models.InlineKeyboardMarkup) {
 		p.RootDomain = root
 	}
 	var text strings.Builder
-	fmt.Fprintf(&text, "请选择规则覆盖范围：\n\n输入域名：%s", input)
+	fmt.Fprintf(&text, "🧭 请选择规则覆盖范围\n\n🔍 输入域名：%s", input)
 	if root != "" {
-		fmt.Fprintf(&text, "\n安全主域名：%s", root)
+		fmt.Fprintf(&text, "\n🛡️ 安全主域名：%s", root)
 	}
-	fmt.Fprintf(&text, "\n\n🎯 仅当前域名\nDOMAIN,%s\n优点：范围最小，不会误伤其他子域名\n缺点：123.%s 不会命中", input, input)
+	fmt.Fprintf(&text, "\n\n🎯 仅当前域名\n📋 规则：DOMAIN,%s\n✅ 优点：范围最小，不会误伤其他子域名\n⚠️ 注意：123.%s 不会命中", input, input)
 	rows := [][]button{{{Text: "🎯 仅当前域名", Data: "match:exact"}}}
 	if root == "" {
-		text.WriteString("\n\n⚠️ 无法安全识别可注册主域名，因此已隐藏后缀范围，避免覆盖公共或共享后缀。")
+		text.WriteString("\n\n⚠️ 无法安全识别主域名\n已隐藏后缀范围，避免误覆盖公共或共享后缀。")
 	} else if root == input {
-		fmt.Fprintf(&text, "\n\n🌐 整个主域名（推荐）\nDOMAIN-SUFFIX,%s\n优点：匹配主域名和所有子域名\n缺点：www、api、cdn 等都会使用同一动作", input)
-		rows = append(rows, []button{{Text: "🌐 整个主域名", Data: "match:suffix"}})
+		fmt.Fprintf(&text, "\n\n🌐 整个主域名 · ⭐ 推荐\n📋 规则：DOMAIN-SUFFIX,%s\n✅ 优点：匹配主域名和所有子域名\n⚠️ 注意：www、api、cdn 等都会使用同一动作", input)
+		rows = append(rows, []button{{Text: "🌐 整个主域名 · ⭐ 推荐", Data: "match:suffix"}})
 	} else {
-		fmt.Fprintf(&text, "\n\n🌿 当前域名及下级（推荐）\nDOMAIN-SUFFIX,%s\n优点：覆盖当前域名和所有下级域名\n缺点：不会覆盖同主域名下的其他分支", input)
-		rows = append(rows, []button{{Text: "🌿 当前域名及下级", Data: "match:suffix"}})
+		fmt.Fprintf(&text, "\n\n🌿 当前域名及下级 · ⭐ 推荐\n📋 规则：DOMAIN-SUFFIX,%s\n✅ 优点：覆盖当前域名和所有下级域名\n⚠️ 注意：不会覆盖同主域名下的其他分支", input)
+		rows = append(rows, []button{{Text: "🌿 当前域名及下级 · ⭐ 推荐", Data: "match:suffix"}})
 		if root != "" {
-			fmt.Fprintf(&text, "\n\n🌐 整个主域名\nDOMAIN-SUFFIX,%s\n优点：一次覆盖整个网站\n缺点：所有子域名都会使用同一动作", root)
+			fmt.Fprintf(&text, "\n\n🌐 整个主域名\n📋 规则：DOMAIN-SUFFIX,%s\n✅ 优点：一次覆盖整个网站\n⚠️ 注意：所有子域名都会使用同一动作", root)
 			rows = append(rows, []button{{Text: "🌐 整个主域名", Data: "match:root"}})
 		}
 	}
@@ -974,7 +974,7 @@ func (b *Bot) helpText() string {
 }
 
 func (b *Bot) welcomeText() string {
-	return "ClashRulePilot\n\n请选择要执行的操作："
+	return "🧭 ClashRulePilot\n\n🔍 请先查询域名。\nBot 会检查个人规则、上游规则、DNS 与 IP 归属，再提供 🟢 直连或 🔴 代理建议。"
 }
 
 func (b *Bot) repo(ctx context.Context, chatID int64) {
@@ -1093,9 +1093,8 @@ func keyboard(rows [][]button) *models.InlineKeyboardMarkup {
 }
 func mainMenu() *models.InlineKeyboardMarkup {
 	return keyboard([][]button{
-		{{Text: "🔍 查询域名", Data: "menu:query"}, {Text: "🟢 添加直连", Data: "menu:add:direct"}},
-		{{Text: "🔴 添加代理", Data: "menu:add:proxy"}, {Text: "🗑️ 删除规则", Data: "menu:remove"}},
-		{{Text: "📋 规则列表", Data: "menu:list"}, {Text: "📊 运行状态", Data: "menu:status"}},
+		{{Text: "🔍 查询域名", Data: "menu:query"}},
+		{{Text: "🗑️ 删除规则", Data: "menu:remove"}, {Text: "📊 运行状态", Data: "menu:status"}},
 		{{Text: "🔗 规则仓库", Data: "menu:repo"}, {Text: "ℹ️ 使用帮助", Data: "menu:help"}},
 	})
 }

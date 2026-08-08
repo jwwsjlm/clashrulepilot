@@ -14,13 +14,12 @@ import (
 func TestMainMenuUsesInlineKeyboard(t *testing.T) {
 	menu := mainMenu()
 	rows := menu.InlineKeyboard
-	if len(rows) != 4 {
-		t.Fatalf("expected 4 menu rows, got %d", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 menu rows, got %d", len(rows))
 	}
 	count := 0
 	want := map[string]bool{
-		"menu:query": false, "menu:add:direct": false, "menu:add:proxy": false, "menu:remove": false,
-		"menu:list": false, "menu:status": false, "menu:repo": false, "menu:help": false,
+		"menu:query": false, "menu:remove": false, "menu:status": false, "menu:repo": false, "menu:help": false,
 	}
 	for _, row := range rows {
 		count += len(row)
@@ -34,8 +33,8 @@ func TestMainMenuUsesInlineKeyboard(t *testing.T) {
 			want[item.CallbackData] = true
 		}
 	}
-	if count != 8 {
-		t.Fatalf("expected 8 menu buttons, got %d", count)
+	if count != 5 {
+		t.Fatalf("expected 5 menu buttons, got %d", count)
 	}
 	for callback, found := range want {
 		if !found {
@@ -117,7 +116,7 @@ func TestSmartMatchMenuForSubdomain(t *testing.T) {
 			labels = append(labels, item.Text)
 		}
 	}
-	for _, want := range []string{"🎯 仅当前域名", "🌿 当前域名及下级", "🌐 整个主域名", "🧰 高级匹配", "✖️ 取消并返回主菜单"} {
+	for _, want := range []string{"🎯 仅当前域名", "🌿 当前域名及下级 · ⭐ 推荐", "🌐 整个主域名", "🧰 高级匹配", "✖️ 取消并返回主菜单"} {
 		found := false
 		for _, label := range labels {
 			if label == want {
@@ -129,9 +128,9 @@ func TestSmartMatchMenuForSubdomain(t *testing.T) {
 			t.Fatalf("missing normalized button label %q: %#v", want, labels)
 		}
 	}
-	for _, banned := range []string{"⭐", "🌟"} {
-		if strings.Contains(text, banned) {
-			t.Fatalf("legacy inconsistent icon %q remains in match menu: %s", banned, text)
+	for _, want := range []string{"🧭 请选择规则覆盖范围", "🔍 输入域名：", "🛡️ 安全主域名：", "📋 规则：", "✅ 优点：", "⚠️ 注意：", "⭐ 推荐"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("match menu is missing standardized label %q: %s", want, text)
 		}
 	}
 }
