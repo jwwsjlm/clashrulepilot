@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"clashrulepilot/internal/app"
 	"clashrulepilot/internal/config"
@@ -33,8 +35,9 @@ type Bot struct {
 }
 
 type pageSnapshot struct {
-	Text   string
-	Markup models.ReplyMarkup
+	Text     string
+	Markup   models.ReplyMarkup
+	Entities []models.MessageEntity
 }
 
 type pending struct {
@@ -805,6 +808,7 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 		root = "未识别"
 	}
 	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n🧱 GEOSITE:GFW：%s\n\n%s\n可注册域名：%s\n📡 中国大陆信号：%s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), dnsText, root, chinaSignal)
+	entities := whoisEntities(text, domainName, root)
 	if geoText != "" {
 		text += "\n" + geoText
 	}
@@ -845,7 +849,40 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 		rows = append(rows, []button{{Text: "🗑️ 删除匹配的个人规则", Data: "query:remove"}})
 	}
 	b.setQuerySession(chatID, domainName, &result)
-	b.send(ctx, chatID, text, keyboard(rows))
+	b.sendWithEntities(ctx, chatID, text, keyboard(rows), entities)
+}
+
+func whoisEntities(text, domainName, registrable string) []models.MessageEntity {
+	targets := []struct {
+		label  string
+		domain string
+	}{
+		{label: "🔍 查询域名：", domain: domainName},
+		{label: "可注册域名：", domain: registrable},
+	}
+	entities := make([]models.MessageEntity, 0, len(targets))
+	for _, target := range targets {
+		if target.domain == "" || target.domain == "未识别" {
+			continue
+		}
+		needle := target.label + target.domain
+		start := strings.Index(text, needle)
+		if start < 0 {
+			continue
+		}
+		start += len(target.label)
+		entities = append(entities, models.MessageEntity{
+			Type:   models.MessageEntityTypeTextLink,
+			Offset: telegramTextLength(text[:start]),
+			Length: telegramTextLength(target.domain),
+			URL:    "https://who.is/whois/" + url.PathEscape(target.domain),
+		})
+	}
+	return entities
+}
+
+func telegramTextLength(value string) int {
+	return len(utf16.Encode([]rune(value)))
 }
 
 func (b *Bot) setQuerySession(chatID int64, domainName string, result *app.QueryResult) {
@@ -1071,7 +1108,7 @@ func (b *Bot) ensureSession(id int64) *pending {
 	return p
 }
 
-func (b *Bot) recordPage(chatID int64, messageID int, text string, kb models.ReplyMarkup, push bool) {
+func (b *Bot) recordPage(chatID int64, messageID int, text string, kb models.ReplyMarkup, entities []models.MessageEntity, push bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	p := b.sessions[chatID]
@@ -1084,7 +1121,7 @@ func (b *Bot) recordPage(chatID int64, messageID int, text string, kb models.Rep
 			p.PageStack = append([]pageSnapshot(nil), p.PageStack[len(p.PageStack)-5:]...)
 		}
 	}
-	p.CurrentPage = &pageSnapshot{Text: text, Markup: kb}
+	p.CurrentPage = &pageSnapshot{Text: text, Markup: kb, Entities: append([]models.MessageEntity(nil), entities...)}
 	p.ActiveMessageID = messageID
 }
 
@@ -1099,7 +1136,7 @@ func (b *Bot) back(ctx context.Context, chatID int64, target *models.Message) {
 	previous := p.PageStack[len(p.PageStack)-1]
 	p.PageStack = p.PageStack[:len(p.PageStack)-1]
 	b.mu.Unlock()
-	b.sendTargetNoPush(ctx, chatID, target, previous.Text, previous.Markup)
+	b.sendTargetModeEntities(ctx, chatID, target, previous.Text, previous.Markup, previous.Entities, false)
 }
 func (b *Bot) markBusy(id int64) bool {
 	b.mu.Lock()
@@ -1158,32 +1195,38 @@ func (b *Bot) send(ctx context.Context, chatID int64, text string, kb models.Rep
 	b.sendTarget(ctx, chatID, nil, text, kb)
 }
 
+func (b *Bot) sendWithEntities(ctx context.Context, chatID int64, text string, kb models.ReplyMarkup, entities []models.MessageEntity) {
+	b.sendTargetModeEntities(ctx, chatID, nil, text, kb, entities, true)
+}
+
 func (b *Bot) sendTarget(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup) {
 	b.sendTargetMode(ctx, chatID, target, text, kb, true)
 }
 
-func (b *Bot) sendTargetNoPush(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup) {
-	b.sendTargetMode(ctx, chatID, target, text, kb, false)
+func (b *Bot) sendTargetMode(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup, push bool) {
+	b.sendTargetModeEntities(ctx, chatID, target, text, kb, nil, push)
 }
 
-func (b *Bot) sendTargetMode(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup, push bool) {
+func (b *Bot) sendTargetModeEntities(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup, entities []models.MessageEntity, push bool) {
+	previewDisabled := true
+	preview := &models.LinkPreviewOptions{IsDisabled: &previewDisabled}
 	if target != nil {
-		if _, err := b.api.EditMessageText(ctx, &tgbot.EditMessageTextParams{ChatID: chatID, MessageID: target.ID, Text: text, ReplyMarkup: kb}); err == nil {
+		if _, err := b.api.EditMessageText(ctx, &tgbot.EditMessageTextParams{ChatID: chatID, MessageID: target.ID, Text: text, Entities: entities, LinkPreviewOptions: preview, ReplyMarkup: kb}); err == nil {
 			log.Printf("telegram message edited chat=%d message=%d", chatID, target.ID)
-			b.recordPage(chatID, target.ID, text, kb, push)
+			b.recordPage(chatID, target.ID, text, kb, entities, push)
 			return
 		} else {
 			log.Printf("telegram edit failed chat=%d message=%d: %v; falling back to send", chatID, target.ID, err)
 		}
 	}
-	msg, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text, ReplyMarkup: kb})
+	msg, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text, Entities: entities, LinkPreviewOptions: preview, ReplyMarkup: kb})
 	if err != nil {
 		log.Printf("telegram send: %v", err)
 		return
 	}
 	log.Printf("telegram message sent chat=%d", chatID)
 	if msg != nil {
-		b.recordPage(chatID, msg.ID, text, kb, push)
+		b.recordPage(chatID, msg.ID, text, kb, entities, push)
 	}
 }
 

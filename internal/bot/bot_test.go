@@ -9,6 +9,7 @@ import (
 
 	"clashrulepilot/internal/lookup"
 	"clashrulepilot/internal/rules"
+	"github.com/go-telegram/bot/models"
 )
 
 func TestMainMenuUsesInlineKeyboard(t *testing.T) {
@@ -245,6 +246,45 @@ func TestDNSReportUsesCompactLineSpacing(t *testing.T) {
 	}
 }
 
+func TestWhoisEntitiesLinkQueryAndRegistrableDomains(t *testing.T) {
+	const (
+		queried     = "rdap.publicinterestregistry.org"
+		registrable = "publicinterestregistry.org"
+	)
+	text := "🔍 查询域名：" + queried + "\n可注册域名：" + registrable
+	entities := whoisEntities(text, queried, registrable)
+	if len(entities) != 2 {
+		t.Fatalf("expected two WHOIS links, got %#v", entities)
+	}
+	wantURLs := []string{
+		"https://who.is/whois/rdap.publicinterestregistry.org",
+		"https://who.is/whois/publicinterestregistry.org",
+	}
+	for index, entity := range entities {
+		if entity.Type != models.MessageEntityTypeTextLink {
+			t.Fatalf("entity %d is not a text link: %#v", index, entity)
+		}
+		if entity.URL != wantURLs[index] {
+			t.Fatalf("entity %d URL=%q want=%q", index, entity.URL, wantURLs[index])
+		}
+	}
+	if entities[0].Offset != telegramTextLength("🔍 查询域名：") || entities[0].Length != telegramTextLength(queried) {
+		t.Fatalf("unexpected queried-domain entity offsets: %#v", entities[0])
+	}
+	rootPrefix := "🔍 查询域名：" + queried + "\n可注册域名："
+	if entities[1].Offset != telegramTextLength(rootPrefix) || entities[1].Length != telegramTextLength(registrable) {
+		t.Fatalf("unexpected registrable-domain entity offsets: %#v", entities[1])
+	}
+}
+
+func TestWhoisEntitiesSkipUnknownRegistrableDomain(t *testing.T) {
+	text := "🔍 查询域名：example.com\n可注册域名：未识别"
+	entities := whoisEntities(text, "example.com", "未识别")
+	if len(entities) != 1 {
+		t.Fatalf("unknown registrable domain must not be linked: %#v", entities)
+	}
+}
+
 func TestDNSDetailsHaveExplicitSectionBreaks(t *testing.T) {
 	var out strings.Builder
 	shown := 0
@@ -339,7 +379,7 @@ func TestSmartSuggestionKeepsMatchingPersonalRuleWithoutButton(t *testing.T) {
 func TestPageStackKeepsMostRecentFivePages(t *testing.T) {
 	b := &Bot{sessions: map[int64]*pending{1: {Mode: "view"}}}
 	for i := 0; i < 8; i++ {
-		b.recordPage(1, i+1, string(rune('A'+i)), homeEditMenu(), true)
+		b.recordPage(1, i+1, string(rune('A'+i)), homeEditMenu(), nil, true)
 	}
 	p := b.sessions[1]
 	if len(p.PageStack) != 5 {
