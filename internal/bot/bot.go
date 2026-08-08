@@ -970,7 +970,32 @@ func (b *Bot) statusTarget(ctx context.Context, chatID int64, target *models.Mes
 }
 
 func (b *Bot) helpText() string {
-	return "ClashRulePilot 使用帮助\n\n支持纯域名、URL、域名:端口和完整 OpenClash/Mihomo 日志。Fake-IP 模式下会使用公网 DoH 获取真实 IP。\n\n域名匹配：\n• DOMAIN：仅完整域名，最安全，但不含子域名。\n• DOMAIN-SUFFIX：域名及所有下级，最适合网站/CDN，但主域名范围可能过大。\n• DOMAIN-KEYWORD：包含关键词即命中，灵活但容易误伤。\n• DOMAIN-WILDCARD：支持 * 和 ?，可控但规则更难理解。\n• DOMAIN-REGEX：能力最强，但最难维护且匹配成本最高。\n• GEOSITE：维护好的域名分类，依赖数据库更新。\n• RULE-SET：批量远程规则，存在更新延迟。\n\n命令兼容：/query、/add、/remove、/list、/sync、/status、/help"
+	return "🧭 ClashRulePilot 使用帮助\n\n" +
+		"🔍 推荐流程\n" +
+		"1. 点击「查询域名」，发送纯域名、URL、域名:端口，或完整 OpenClash/Mihomo 日志。\n" +
+		"2. 查看个人规则、Aethersailor、国内/国外 DNS 和 IP 归属。\n" +
+		"3. 根据结果选择「添加直连」或「添加代理」，再选择匹配范围并确认提交。\n" +
+		"4. 规则提交成功后，点击「规则仓库」获取最新 Raw 地址。\n\n" +
+		"📘 个人规则接入 OpenClash\n" +
+		"① 点击本 Bot 主菜单的「🔗 规则仓库」，复制「个人覆写」Raw 地址。\n" +
+		"② LuCI 路径：服务 → OpenClash → 运行状态 → 顶部「覆写模块」按钮。\n" +
+		"③ 在覆写编辑器点击「+」→ Subscribe，类型选择远程/HTTP，粘贴 Raw 地址。\n" +
+		"④ 目标配置选择「所有配置文件」（对应 config=all），启用模块并保存；config 留空会导致覆写永不生效。\n" +
+		"⑤ 点击模块刷新后，重启 OpenClash。可在 服务 → OpenClash → 配置管理 → 当前配置 → 下载运行配置，检查 rules 顶部是否出现个人规则。\n" +
+		"⑥ 若同时存在其他会修改 rules 的覆写模块，请让个人模块在其之后执行（覆写 order 数值越小越晚执行），确保个人 +rules 位于最前面。\n\n" +
+		"🧠 规则原理\n" +
+		"个人覆写文件使用 [YAML] 段和 +rules，将个人规则插入订阅规则之前；Mihomo 按 rules 从上到下匹配，因此更具体、排在前面的个人规则可覆盖上游规则。\n\n" +
+		"🧩 匹配方式\n" +
+		"• DOMAIN：仅完整域名，范围最小、误匹配最低；不包含子域名。\n" +
+		"• DOMAIN-SUFFIX：当前域名及所有下级，适合网站/CDN；主域名范围可能过大。\n" +
+		"• DOMAIN-KEYWORD：域名包含关键词即命中，灵活但容易误伤。\n" +
+		"• DOMAIN-WILDCARD：支持 * 和 ?，比关键词可控；规则较难理解。\n" +
+		"• DOMAIN-REGEX：表达能力最强；最难维护，写错也更难排查。\n" +
+		"• GEOSITE：维护好的分类数据库，依赖数据库更新，不适合临时个人域名。\n" +
+		"• RULE-SET：批量引用规则集合，便于共享，但存在远程依赖和更新延迟。\n\n" +
+		"🛠️ 排障\n" +
+		"先检查 系统 → 软件包 的依赖；仍异常时到 服务 → OpenClash → 插件设置 → 调试日志 → 生成，查看依赖、覆写、YAML、DNS 和防火墙信息。\n\n" +
+		"⌨️ 命令兼容：/query、/add、/remove、/list、/sync、/status、/help"
 }
 
 func (b *Bot) welcomeText() string {

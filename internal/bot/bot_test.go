@@ -75,6 +75,28 @@ func TestHomeMenuUsesInlineKeyboard(t *testing.T) {
 	}
 }
 
+func TestHelpIncludesPersonalRuleTutorial(t *testing.T) {
+	b := &Bot{}
+	text := b.helpText()
+	for _, want := range []string{
+		"📘 个人规则接入 OpenClash",
+		"服务 → OpenClash → 运行状态 → 顶部「覆写模块」按钮",
+		"Subscribe",
+		"config=all",
+		"点击模块刷新后，重启 OpenClash",
+		"+rules",
+		"系统 → 软件包",
+		"服务 → OpenClash → 插件设置 → 调试日志 → 生成",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("help text missing tutorial item %q: %s", want, text)
+		}
+	}
+	if len([]rune(text)) >= 4096 {
+		t.Fatalf("help text must fit Telegram message limit, got %d runes", len([]rune(text)))
+	}
+}
+
 func TestCancelMenuIsSingleStepToMainMenu(t *testing.T) {
 	menu := cancelMenu()
 	if len(menu.InlineKeyboard) != 1 || len(menu.InlineKeyboard[0]) != 1 {
