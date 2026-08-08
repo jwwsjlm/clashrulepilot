@@ -215,3 +215,30 @@ func TestGeoSuggestionColorsOnlyRoutingKeywords(t *testing.T) {
 		t.Fatalf("unexpected direct suggestion: %q kind=%q", directText, directKind)
 	}
 }
+
+func TestCountryFlag(t *testing.T) {
+	cases := map[string]string{
+		"US":   "🇺🇸",
+		"cn":   "🇨🇳",
+		" JP ": "🇯🇵",
+		"":     "🌐",
+		"USA":  "🌐",
+		"1A":   "🌐",
+	}
+	for input, want := range cases {
+		if got := countryFlag(input); got != want {
+			t.Fatalf("countryFlag(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
+func TestGeoPlaceIncludesCountryFlag(t *testing.T) {
+	got := geoPlace(lookup.GeoIPInfo{
+		Country: "United States", CountryCode: "US", Region: "California", City: "San Francisco", ISP: "Cloudflare, Inc.", ASN: "13335",
+	})
+	for _, want := range []string{"🇺🇸 United States", "California", "San Francisco", "ISP Cloudflare, Inc.", "AS13335"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("geoPlace missing %q: %s", want, got)
+		}
+	}
+}

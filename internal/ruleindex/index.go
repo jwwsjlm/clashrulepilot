@@ -48,27 +48,38 @@ type sourceMeta struct {
 }
 
 type diskMetadata struct {
-	Version   int                   `json:"version"`
-	UpdatedAt time.Time             `json:"updated_at"`
-	Sources   map[string]sourceMeta `json:"sources"`
-	Direct    int                   `json:"direct"`
-	Proxy     int                   `json:"proxy"`
-	Category  int                   `json:"category"`
-	GeoSite   int                   `json:"geosite"`
-	GFW       int                   `json:"gfw"`
+	Version             int                   `json:"version"`
+	UpdatedAt           time.Time             `json:"updated_at"`
+	Sources             map[string]sourceMeta `json:"sources"`
+	RuleVersion         string                `json:"rule_version,omitempty"`
+	UpstreamSHA         string                `json:"upstream_sha,omitempty"`
+	UpstreamCommittedAt time.Time             `json:"upstream_committed_at,omitempty"`
+	UpstreamCheckedAt   time.Time             `json:"upstream_checked_at,omitempty"`
+	Direct              int                   `json:"direct"`
+	Proxy               int                   `json:"proxy"`
+	Category            int                   `json:"category"`
+	GeoSite             int                   `json:"geosite"`
+	GFW                 int                   `json:"gfw"`
 }
 
 type Status struct {
-	Enabled   bool
-	Loaded    bool
-	UpdatedAt time.Time
-	Sources   int
-	Direct    int
-	Proxy     int
-	Category  int
-	GeoSite   int
-	GFW       int
-	LastError string
+	Enabled             bool
+	Loaded              bool
+	UpdatedAt           time.Time
+	Sources             int
+	Direct              int
+	Proxy               int
+	Category            int
+	GeoSite             int
+	GFW                 int
+	LastError           string
+	RuleVersion         string
+	IndexedUpstreamSHA  string
+	UpstreamSHA         string
+	UpstreamCommittedAt time.Time
+	UpstreamCheckedAt   time.Time
+	UpstreamState       string
+	UpstreamCheckError  string
 }
 
 type Match struct {
@@ -180,6 +191,8 @@ func (m *Manager) Sync(ctx context.Context) (bool, error) {
 		m.setError(err)
 		return false, err
 	}
+	revision, revisionErr := m.fetchUpstreamRevision(ctx)
+	checkedAt := time.Now().UTC()
 	if err := os.MkdirAll(m.dataDir, 0o755); err != nil {
 		m.setError(err)
 		return false, err
@@ -240,11 +253,21 @@ func (m *Manager) Sync(ctx context.Context) (bool, error) {
 	}
 
 	changed := !hadDatabase || missingLocalSource || !reflect.DeepEqual(old.Sources, metas)
+	if revisionErr == nil && revision.SHA != "" && revision.SHA != old.UpstreamSHA {
+		// Persist the repository revision even when the tracked rule files did not change.
+		changed = true
+	}
 	if !changed {
+		m.setUpstreamCheck(revision, checkedAt, revisionErr)
 		m.setError(nil)
 		return false, nil
 	}
-	metadata := diskMetadata{Version: 3, UpdatedAt: time.Now().UTC(), Sources: metas}
+	metadata := diskMetadata{Version: 4, UpdatedAt: time.Now().UTC(), Sources: metas, RuleVersion: ruleVersion(metas), UpstreamSHA: old.UpstreamSHA, UpstreamCommittedAt: old.UpstreamCommittedAt, UpstreamCheckedAt: old.UpstreamCheckedAt}
+	if revisionErr == nil {
+		metadata.UpstreamSHA = revision.SHA
+		metadata.UpstreamCommittedAt = revision.CommittedAt
+		metadata.UpstreamCheckedAt = checkedAt
+	}
 	tmpDatabase := m.databasePath() + ".tmp"
 	metadata, err = buildDatabase(tmpDatabase, stageDir, sources, metadata)
 	if err != nil {
@@ -262,6 +285,9 @@ func (m *Manager) Sync(ctx context.Context) (bool, error) {
 	}
 	m.removeLegacySnapshots()
 	m.installStatus(metadata)
+	if revisionErr != nil {
+		m.setUpstreamCheck(upstreamRevision{}, checkedAt, revisionErr)
+	}
 	m.setError(nil)
 	return true, nil
 }
@@ -333,6 +359,60 @@ func (m *Manager) Status() Status {
 	m.statusMu.RLock()
 	defer m.statusMu.RUnlock()
 	return m.status
+}
+
+// CheckLatest performs a lightweight branch HEAD check. It does not rebuild the
+// local index; it only updates the in-memory status so the Bot can report whether
+// the indexed snapshot is still current.
+func (m *Manager) CheckLatest(ctx context.Context) Status {
+	if !m.enabled {
+		return m.Status()
+	}
+	revision, err := m.fetchUpstreamRevision(ctx)
+	m.setUpstreamCheck(revision, time.Now().UTC(), err)
+	return m.Status()
+}
+
+type upstreamRevision struct {
+	SHA         string
+	CommittedAt time.Time
+}
+
+func (m *Manager) fetchUpstreamRevision(ctx context.Context) (upstreamRevision, error) {
+	parts := strings.SplitN(strings.Trim(m.upstreamRepo, "/"), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return upstreamRevision{}, fmt.Errorf("UPSTREAM_REPO must be owner/repository")
+	}
+	commit, _, err := m.github.Repositories.GetCommit(ctx, parts[0], parts[1], m.branch, nil)
+	if err != nil {
+		return upstreamRevision{}, fmt.Errorf("check upstream revision: %w", err)
+	}
+	committedAt := commit.GetCommit().GetCommitter().GetDate().Time
+	if committedAt.IsZero() {
+		committedAt = commit.GetCommit().GetAuthor().GetDate().Time
+	}
+	return upstreamRevision{SHA: commit.GetSHA(), CommittedAt: committedAt}, nil
+}
+
+func (m *Manager) setUpstreamCheck(revision upstreamRevision, checkedAt time.Time, err error) {
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	m.status.UpstreamCheckedAt = checkedAt
+	if err != nil {
+		m.status.UpstreamState = "error"
+		m.status.UpstreamCheckError = err.Error()
+		return
+	}
+	m.status.UpstreamCheckError = ""
+	m.status.UpstreamSHA = revision.SHA
+	m.status.UpstreamCommittedAt = revision.CommittedAt
+	if revision.SHA == "" || m.status.IndexedUpstreamSHA == "" {
+		m.status.UpstreamState = "unknown"
+	} else if revision.SHA == m.status.IndexedUpstreamSHA {
+		m.status.UpstreamState = "latest"
+	} else {
+		m.status.UpstreamState = "stale"
+	}
 }
 
 func (m *Manager) discoverSources(ctx context.Context) ([]source, error) {
@@ -680,11 +760,33 @@ func (m *Manager) installStatus(metadata diskMetadata) {
 	status := Status{
 		Enabled: true, Loaded: true, UpdatedAt: metadata.UpdatedAt, Sources: len(metadata.Sources),
 		Direct: metadata.Direct, Proxy: metadata.Proxy, Category: metadata.Category, GeoSite: metadata.GeoSite, GFW: metadata.GFW,
+		RuleVersion: metadata.RuleVersion, IndexedUpstreamSHA: metadata.UpstreamSHA, UpstreamSHA: metadata.UpstreamSHA,
+		UpstreamCommittedAt: metadata.UpstreamCommittedAt, UpstreamCheckedAt: metadata.UpstreamCheckedAt,
+	}
+	if metadata.UpstreamSHA != "" {
+		status.UpstreamState = "latest"
+	} else {
+		status.UpstreamState = "unknown"
 	}
 	m.statusMu.Lock()
 	status.LastError = m.status.LastError
+	status.UpstreamCheckError = m.status.UpstreamCheckError
 	m.status = status
 	m.statusMu.Unlock()
+}
+
+func ruleVersion(metas map[string]sourceMeta) string {
+	keys := make([]string, 0, len(metas))
+	for name := range metas {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, name := range keys {
+		meta := metas[name]
+		fmt.Fprintf(h, "%s\x00%s\x00%s\n", name, meta.RemoteSHA, meta.SHA256)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (m *Manager) setError(err error) {

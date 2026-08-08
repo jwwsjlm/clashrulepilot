@@ -182,6 +182,79 @@ func TestLiveIndexSync(t *testing.T) {
 	}
 }
 
+func TestUpstreamRevisionStatusAndPersistence(t *testing.T) {
+	var head atomic.Value
+	head.Store("head-v1")
+	var failHead atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/Aethersailor/Custom_OpenClash_Rules/commits/main":
+			if failHead.Load() {
+				http.Error(w, "temporary failure", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"sha":%q,"commit":{"committer":{"date":"2026-08-08T01:00:00Z"},"author":{"date":"2026-08-08T01:00:00Z"}}}`, head.Load().(string))
+		case "/repos/Aethersailor/Custom_OpenClash_Rules/contents/rule":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `[{"type":"file","name":"Custom_Direct_Domain.yaml","sha":"direct-v1","download_url":%q}]`, serverURL(r)+"/raw/direct")
+		case "/raw/direct":
+			_, _ = fmt.Fprint(w, "payload:\n  - DOMAIN-SUFFIX,example.com\n")
+		case "/raw/geosite":
+			_, _ = fmt.Fprint(w, "payload:\n  - DOMAIN-SUFFIX,cn.example\n")
+		case "/raw/gfw":
+			_, _ = fmt.Fprint(w, "payload:\n  - DOMAIN-SUFFIX,linux.do\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	m := New(true, dir, "Aethersailor/Custom_OpenClash_Rules", "main", "")
+	m.github = gh.NewClient(server.Client())
+	m.github.BaseURL, _ = url.Parse(server.URL + "/")
+	m.http = server.Client()
+	m.geositeURL = server.URL + "/raw/geosite"
+	m.gfwURL = server.URL + "/raw/gfw"
+	t.Cleanup(func() { _ = m.Close() })
+
+	if changed, err := m.Sync(context.Background()); err != nil || !changed {
+		t.Fatalf("first sync changed=%v err=%v", changed, err)
+	}
+	status := m.Status()
+	if status.IndexedUpstreamSHA != "head-v1" || status.UpstreamState != "latest" || status.RuleVersion == "" {
+		t.Fatalf("unexpected synced status: %+v", status)
+	}
+
+	head.Store("head-v2")
+	status = m.CheckLatest(context.Background())
+	if status.UpstreamState != "stale" || status.UpstreamSHA != "head-v2" {
+		t.Fatalf("expected stale status: %+v", status)
+	}
+
+	failHead.Store(true)
+	status = m.CheckLatest(context.Background())
+	if status.UpstreamState != "error" || status.UpstreamCheckError == "" {
+		t.Fatalf("expected revision check error: %+v", status)
+	}
+
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := New(true, dir, "Aethersailor/Custom_OpenClash_Rules", "main", "")
+	reloaded.geositeURL = server.URL + "/raw/geosite"
+	reloaded.gfwURL = server.URL + "/raw/gfw"
+	t.Cleanup(func() { _ = reloaded.Close() })
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	loaded := reloaded.Status()
+	if loaded.IndexedUpstreamSHA != "head-v1" || loaded.RuleVersion == "" {
+		t.Fatalf("revision metadata did not persist: %+v", loaded)
+	}
+}
+
 func testManagerWithEntries(t *testing.T, entries []Entry) *Manager {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")

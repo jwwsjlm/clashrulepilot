@@ -86,7 +86,10 @@ func (s *Service) IndexEnabled() bool            { return s.cfg.UpstreamIndex }
 func (s *Service) RepoWebURL() string            { return s.repo.WebURL() }
 func (s *Service) RepoRawURL(file string) string { return s.repo.RawURL(file) }
 func (s *Service) IndexStatus() ruleindex.Status { return s.index.Status() }
-func (s *Service) LookupStatus() lookup.Status   { return s.lookup.Status() }
+func (s *Service) CheckIndexStatus(ctx context.Context) ruleindex.Status {
+	return s.index.CheckLatest(ctx)
+}
+func (s *Service) LookupStatus() lookup.Status { return s.lookup.Status() }
 func (s *Service) Bootstrap(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

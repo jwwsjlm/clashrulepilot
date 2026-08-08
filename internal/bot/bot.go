@@ -200,12 +200,16 @@ func (b *Bot) handlePendingText(ctx context.Context, chatID int64, text string) 
 }
 
 func (b *Bot) acceptDomain(ctx context.Context, chatID int64, p *pending, domainName string) {
+	b.acceptDomainTarget(ctx, chatID, p, domainName, nil)
+}
+
+func (b *Bot) acceptDomainTarget(ctx context.Context, chatID int64, p *pending, domainName string, target *models.Message) {
 	switch p.Mode {
 	case "add":
 		p.OriginalDomain = domainName
 		p.Domain = domainName
 		p.RootDomain = domain.RuleRoot(domainName)
-		b.showMatchMenu(ctx, chatID, p)
+		b.showMatchMenuTarget(ctx, chatID, p, target)
 	case "query":
 		b.clear(chatID)
 		b.query(ctx, chatID, domainName)
@@ -215,8 +219,12 @@ func (b *Bot) acceptDomain(ctx context.Context, chatID int64, p *pending, domain
 }
 
 func (b *Bot) showMatchMenu(ctx context.Context, chatID int64, p *pending) {
+	b.showMatchMenuTarget(ctx, chatID, p, nil)
+}
+
+func (b *Bot) showMatchMenuTarget(ctx context.Context, chatID int64, p *pending, target *models.Message) {
 	text, menu := matchMenuContent(p)
-	b.send(ctx, chatID, text, menu)
+	b.sendTarget(ctx, chatID, target, text, menu)
 }
 
 func matchMenuContent(p *pending) (string, *models.InlineKeyboardMarkup) {
@@ -258,12 +266,16 @@ func matchMenuContent(p *pending) (string, *models.InlineKeyboardMarkup) {
 }
 
 func (b *Bot) showAdvancedMenu(ctx context.Context, chatID int64, p *pending) {
+	b.showAdvancedMenuTarget(ctx, chatID, p, nil)
+}
+
+func (b *Bot) showAdvancedMenuTarget(ctx context.Context, chatID int64, p *pending, target *models.Message) {
 	text := "🧰 高级域名匹配\n\n" +
 		"🔑 DOMAIN-KEYWORD\n包含关键词即命中；灵活但容易误匹配。\n\n" +
 		"✳️ DOMAIN-WILDCARD\n使用 * 和 ?；比关键词可控，但 *.example.com 通常不匹配根域名。\n\n" +
 		"🧩 DOMAIN-REGEX\n表达能力最强；最难维护且容易写错。\n\n" +
 		"常规域名优先使用上一页的 DOMAIN 或 DOMAIN-SUFFIX。"
-	b.send(ctx, chatID, text, keyboard([][]button{
+	b.sendTarget(ctx, chatID, target, text, keyboard([][]button{
 		{{Text: "🔑 关键词", Data: "advanced:keyword"}},
 		{{Text: "✳️ 通配符", Data: "advanced:wildcard"}},
 		{{Text: "🧩 正则表达式", Data: "advanced:regex"}},
@@ -272,18 +284,26 @@ func (b *Bot) showAdvancedMenu(ctx context.Context, chatID int64, p *pending) {
 }
 
 func (b *Bot) showAdvancedOption(ctx context.Context, chatID int64, p *pending) {
+	b.showAdvancedOptionTarget(ctx, chatID, p, nil)
+}
+
+func (b *Bot) showAdvancedOptionTarget(ctx context.Context, chatID int64, p *pending, target *models.Message) {
 	name, benefit, risk := advancedDescription(p.AdvancedMatch)
 	text := fmt.Sprintf("%s\n\n建议值：\n%s\n\n优点：%s\n风险：%s\n\n你可以使用建议值，或者输入自定义内容。", name, p.AdvancedSuggest, benefit, risk)
-	b.send(ctx, chatID, text, keyboard([][]button{
+	b.sendTarget(ctx, chatID, target, text, keyboard([][]button{
 		{{Text: "✅ 使用建议", Data: "advanced:use"}, {Text: "✍️ 自定义输入", Data: "advanced:custom"}},
 		{{Text: "↩️ 返回高级匹配", Data: "match:advanced"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 	}))
 }
 
 func (b *Bot) showAdvancedConfirmation(ctx context.Context, chatID int64, p *pending) {
+	b.showAdvancedConfirmationTarget(ctx, chatID, p, nil)
+}
+
+func (b *Bot) showAdvancedConfirmationTarget(ctx context.Context, chatID int64, p *pending, target *models.Message) {
 	name, _, risk := advancedDescription(p.Match)
 	text := fmt.Sprintf("⚠️ 请确认高级规则\n\n类型：%s\n准备提交：%s\n动作：%s\n\n风险：%s", name, rules.Token(toRule(p, 0)), actionText(p.Action), risk)
-	b.send(ctx, chatID, text, keyboard([][]button{
+	b.sendTarget(ctx, chatID, target, text, keyboard([][]button{
 		{{Text: "✅ 确认提交", Data: "advanced:confirm"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 	}))
 }
@@ -323,6 +343,10 @@ func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pendin
 }
 
 func (b *Bot) startAddMode(ctx context.Context, chatID int64, action rules.Action) {
+	b.startAddModeTarget(ctx, chatID, action, nil)
+}
+
+func (b *Bot) startAddModeTarget(ctx context.Context, chatID int64, action rules.Action, target *models.Message) {
 	b.mu.Lock()
 	b.sessions[chatID] = &pending{Mode: "add", Action: action}
 	b.mu.Unlock()
@@ -330,21 +354,29 @@ func (b *Bot) startAddMode(ctx context.Context, chatID int64, action rules.Actio
 	if action == rules.Proxy {
 		actionText = "代理"
 	}
-	b.send(ctx, chatID, fmt.Sprintf("将域名添加到“%s”规则，请发送域名或 URL：", actionText), cancelMenu())
+	b.sendTarget(ctx, chatID, target, fmt.Sprintf("将域名添加到“%s”规则，请发送域名或 URL：", actionText), cancelMenu())
 }
 
 func (b *Bot) startQueryMode(ctx context.Context, chatID int64) {
+	b.startQueryModeTarget(ctx, chatID, nil)
+}
+
+func (b *Bot) startQueryModeTarget(ctx context.Context, chatID int64, target *models.Message) {
 	b.mu.Lock()
 	b.sessions[chatID] = &pending{Mode: "query"}
 	b.mu.Unlock()
-	b.send(ctx, chatID, "请输入要查询的域名或 URL，例如：example.com", cancelMenu())
+	b.sendTarget(ctx, chatID, target, "请输入要查询的域名或 URL，例如：example.com", cancelMenu())
 }
 
 func (b *Bot) startRemoveMode(ctx context.Context, chatID int64) {
+	b.startRemoveModeTarget(ctx, chatID, nil)
+}
+
+func (b *Bot) startRemoveModeTarget(ctx context.Context, chatID int64, target *models.Message) {
 	b.mu.Lock()
 	b.sessions[chatID] = &pending{Mode: "remove"}
 	b.mu.Unlock()
-	b.send(ctx, chatID, "请输入要删除的域名或 URL：", cancelMenu())
+	b.sendTarget(ctx, chatID, target, "请输入要删除的域名或 URL：", cancelMenu())
 }
 
 func (b *Bot) addStart(ctx context.Context, chatID int64, parts []string) {
@@ -380,32 +412,36 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 
 	switch query.Data {
 	case "menu:query":
-		b.startQueryMode(ctx, chatID)
+		b.startQueryModeTarget(ctx, chatID, message)
 		return
 	case "menu:add:direct":
-		b.startAddMode(ctx, chatID, rules.Direct)
+		b.startAddModeTarget(ctx, chatID, rules.Direct, message)
 		return
 	case "menu:add:proxy":
-		b.startAddMode(ctx, chatID, rules.Proxy)
+		b.startAddModeTarget(ctx, chatID, rules.Proxy, message)
 		return
 	case "menu:remove":
-		b.startRemoveMode(ctx, chatID)
+		b.startRemoveModeTarget(ctx, chatID, message)
 		return
 	case "menu:list":
 		b.clear(chatID)
-		b.list(ctx, chatID)
+		b.listTarget(ctx, chatID, message)
 		return
 	case "menu:status":
 		b.clear(chatID)
-		b.status(ctx, chatID)
+		b.statusTarget(ctx, chatID, message)
 		return
 	case "menu:repo":
 		b.clear(chatID)
-		b.repo(ctx, chatID)
+		b.repoTarget(ctx, chatID, message)
 		return
 	case "menu:help":
 		b.clear(chatID)
-		b.send(ctx, chatID, b.helpText(), homeMenu())
+		b.sendTarget(ctx, chatID, message, b.helpText(), homeEditMenu())
+		return
+	case "nav:home:edit":
+		b.clear(chatID)
+		b.sendTarget(ctx, chatID, message, b.welcomeText(), mainMenu())
 		return
 	case "nav:home":
 		b.clear(chatID)
@@ -413,11 +449,11 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		return
 	case "nav:cancel", "cancel", "confirm:no":
 		b.clear(chatID)
-		b.send(ctx, chatID, "已取消当前操作。", homeMenu())
+		b.sendTarget(ctx, chatID, message, "已取消当前操作。", homeEditMenu())
 		return
 	}
 	if strings.HasPrefix(query.Data, "dns:details:") {
-		b.sendDNSDetails(ctx, chatID, query.Data)
+		b.sendDNSDetailsTarget(ctx, chatID, query.Data, message)
 		return
 	}
 
@@ -436,7 +472,7 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		}
 		domainName := pendingRule.Candidates[n]
 		pendingRule.Candidates = nil
-		b.acceptDomain(ctx, chatID, pendingRule, domainName)
+		b.acceptDomainTarget(ctx, chatID, pendingRule, domainName, message)
 		return
 	}
 
@@ -459,15 +495,15 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		pendingRule.Domain = pendingRule.RootDomain
 		pendingRule.Match = rules.Suffix
 	case "match:advanced":
-		b.showAdvancedMenu(ctx, chatID, pendingRule)
+		b.showAdvancedMenuTarget(ctx, chatID, pendingRule, message)
 		return
 	case "advanced:keyword", "advanced:wildcard", "advanced:regex":
 		pendingRule.AdvancedMatch = rules.Match(strings.TrimPrefix(query.Data, "advanced:"))
 		pendingRule.AdvancedSuggest = advancedSuggestion(pendingRule.AdvancedMatch, pendingRule.OriginalDomain, pendingRule.RootDomain)
-		b.showAdvancedOption(ctx, chatID, pendingRule)
+		b.showAdvancedOptionTarget(ctx, chatID, pendingRule, message)
 		return
 	case "advanced:back":
-		b.showMatchMenu(ctx, chatID, pendingRule)
+		b.showMatchMenuTarget(ctx, chatID, pendingRule, message)
 		return
 	case "advanced:use":
 		value, err := rules.ValidatePattern(pendingRule.AdvancedMatch, pendingRule.AdvancedSuggest)
@@ -477,11 +513,11 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		}
 		pendingRule.Domain = value
 		pendingRule.Match = pendingRule.AdvancedMatch
-		b.showAdvancedConfirmation(ctx, chatID, pendingRule)
+		b.showAdvancedConfirmationTarget(ctx, chatID, pendingRule, message)
 		return
 	case "advanced:custom":
 		pendingRule.AwaitingPattern = true
-		b.send(ctx, chatID, advancedInputPrompt(pendingRule.AdvancedMatch), cancelMenu())
+		b.sendTarget(ctx, chatID, message, advancedInputPrompt(pendingRule.AdvancedMatch), cancelMenu())
 		return
 	case "advanced:confirm":
 		b.commitPending(ctx, chatID, query.From.ID, pendingRule, false)
@@ -523,7 +559,7 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 	}
 
 	if pendingRule.Action != "" && pendingRule.Match == "" {
-		b.showMatchMenu(ctx, chatID, pendingRule)
+		b.showMatchMenuTarget(ctx, chatID, pendingRule, message)
 		return
 	}
 	if pendingRule.Action != "" && pendingRule.Match != "" {
@@ -724,7 +760,7 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	if hasDirect {
 		rows = append(rows, []button{{Text: "🔴 覆写为个人代理", Data: "override:proxy"}})
 	}
-	rows = append(rows, []button{{Text: "🏠 主菜单", Data: "nav:home"}})
+	rows = append(rows, []button{{Text: "🏠 主菜单", Data: "nav:home:edit"}})
 	if hasDirect || hasProxy {
 		b.mu.Lock()
 		b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
@@ -754,26 +790,31 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 }
 
 func (b *Bot) list(ctx context.Context, chatID int64) {
+	b.listTarget(ctx, chatID, nil)
+}
+
+func (b *Bot) listTarget(ctx context.Context, chatID int64, target *models.Message) {
 	store, err := b.service.LoadStore(ctx)
 	if err != nil {
-		b.send(ctx, chatID, "读取规则失败："+err.Error(), homeMenu())
+		b.sendTarget(ctx, chatID, target, "读取规则失败："+err.Error(), homeEditMenu())
 		return
 	}
 	if len(store.Rules) == 0 {
-		b.send(ctx, chatID, "当前没有个人规则。", homeMenu())
+		b.sendTarget(ctx, chatID, target, "当前没有个人规则。", homeEditMenu())
 		return
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "个人规则共 %d 条：\n", len(store.Rules))
 	ordered := rules.Ordered(store.Rules)
+	const maxListRules = 20
 	for i, r := range ordered {
-		if i >= 80 {
+		if i >= maxListRules {
 			fmt.Fprintf(&out, "\n… 其余 %d 条未显示", len(ordered)-i)
 			break
 		}
 		fmt.Fprintf(&out, "%d. %s → %s\n", i+1, rules.Token(r), actionText(r.Action))
 	}
-	b.send(ctx, chatID, out.String(), homeMenu())
+	b.sendTarget(ctx, chatID, target, out.String(), homeEditMenu())
 }
 
 func (b *Bot) sync(ctx context.Context, chatID int64) {
@@ -798,12 +839,18 @@ func (b *Bot) sync(ctx context.Context, chatID int64) {
 }
 
 func (b *Bot) status(ctx context.Context, chatID int64) {
+	b.statusTarget(ctx, chatID, nil)
+}
+
+func (b *Bot) statusTarget(ctx context.Context, chatID int64, target *models.Message) {
 	store, err := b.service.LoadStore(ctx)
 	if err != nil {
-		b.send(ctx, chatID, "状态读取失败："+err.Error(), homeMenu())
+		b.sendTarget(ctx, chatID, target, "状态读取失败："+err.Error(), homeEditMenu())
 		return
 	}
-	idx := b.service.IndexStatus()
+	checkCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	idx := b.service.CheckIndexStatus(checkCtx)
+	cancel()
 	dns := b.service.LookupStatus()
 	updated := "从未"
 	if !idx.UpdatedAt.IsZero() {
@@ -821,7 +868,42 @@ func (b *Bot) status(ctx context.Context, chatID int64) {
 	if provider == "" {
 		provider = "尚未使用"
 	}
-	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, b.service.SyncEnabled()), homeMenu())
+	upstream := "📦 上游规则\n仓库：" + b.cfg.UpstreamRepo + "\n分支：" + b.cfg.UpstreamBranch
+	ruleVersion := idx.RuleVersion
+	if ruleVersion == "" {
+		ruleVersion = "未生成"
+	}
+	indexedSHA := idx.IndexedUpstreamSHA
+	if indexedSHA == "" {
+		indexedSHA = "未记录"
+	}
+	upstream += "\n当前索引版本：" + short(ruleVersion) + "\n索引对应提交：" + short(indexedSHA)
+	if !idx.UpstreamCommittedAt.IsZero() {
+		upstream += "\n上游提交时间：" + idx.UpstreamCommittedAt.In(b.cfg.Location).Format("2006-01-02 15:04:05")
+	} else {
+		upstream += "\n上游提交时间：未知"
+	}
+	upstream += "\n本地同步时间：" + updated
+	if !idx.UpstreamCheckedAt.IsZero() {
+		upstream += "\n远端检查时间：" + idx.UpstreamCheckedAt.In(b.cfg.Location).Format("2006-01-02 15:04:05")
+	}
+	switch idx.UpstreamState {
+	case "latest":
+		upstream += "\n状态：✅ 已是最新版"
+	case "stale":
+		upstream += "\n状态：⚠️ 有新版本，建议点击同步"
+		if idx.UpstreamSHA != "" {
+			upstream += "\n远端最新提交：" + short(idx.UpstreamSHA)
+		}
+	case "error":
+		upstream += "\n状态：⚠️ 无法确认"
+		if idx.UpstreamCheckError != "" {
+			upstream += "\n检查异常：" + idx.UpstreamCheckError
+		}
+	default:
+		upstream += "\n状态：未检查"
+	}
+	b.sendTarget(ctx, chatID, target, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n上游公开镜像：%t\n\n%s", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, b.service.SyncEnabled(), upstream), homeEditMenu())
 }
 
 func (b *Bot) helpText() string {
@@ -833,7 +915,11 @@ func (b *Bot) welcomeText() string {
 }
 
 func (b *Bot) repo(ctx context.Context, chatID int64) {
-	b.send(ctx, chatID, fmt.Sprintf("规则仓库\n%s\n\n个人覆写：\n%s", b.service.RepoWebURL(), b.service.RepoRawURL("openclash/personal-overwrite.ini")), homeMenu())
+	b.repoTarget(ctx, chatID, nil)
+}
+
+func (b *Bot) repoTarget(ctx context.Context, chatID int64, target *models.Message) {
+	b.sendTarget(ctx, chatID, target, fmt.Sprintf("规则仓库\n%s\n\n个人覆写：\n%s", b.service.RepoWebURL(), b.service.RepoRawURL("openclash/personal-overwrite.ini")), homeEditMenu())
 }
 
 func (b *Bot) clear(id int64) { b.mu.Lock(); delete(b.sessions, id); b.mu.Unlock() }
@@ -880,10 +966,25 @@ func mainMenu() *models.InlineKeyboardMarkup {
 func homeMenu() *models.InlineKeyboardMarkup {
 	return keyboard([][]button{{{Text: "🏠 主菜单", Data: "nav:home"}}})
 }
+func homeEditMenu() *models.InlineKeyboardMarkup {
+	return keyboard([][]button{{{Text: "🏠 主菜单", Data: "nav:home:edit"}}})
+}
 func cancelMenu() *models.InlineKeyboardMarkup {
-	return keyboard([][]button{{{Text: "✖️ 取消", Data: "nav:cancel"}, {Text: "🏠 主菜单", Data: "nav:home"}}})
+	return keyboard([][]button{{{Text: "✖️ 取消", Data: "nav:cancel"}, {Text: "🏠 主菜单", Data: "nav:home:edit"}}})
 }
 func (b *Bot) send(ctx context.Context, chatID int64, text string, kb models.ReplyMarkup) {
+	b.sendTarget(ctx, chatID, nil, text, kb)
+}
+
+func (b *Bot) sendTarget(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup) {
+	if target != nil {
+		if _, err := b.api.EditMessageText(ctx, &tgbot.EditMessageTextParams{ChatID: chatID, MessageID: target.ID, Text: text, ReplyMarkup: kb}); err == nil {
+			log.Printf("telegram message edited chat=%d message=%d", chatID, target.ID)
+			return
+		} else {
+			log.Printf("telegram edit failed chat=%d message=%d: %v; falling back to send", chatID, target.ID, err)
+		}
+	}
 	_, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text, ReplyMarkup: kb})
 	if err != nil {
 		log.Printf("telegram send: %v", err)
@@ -1016,6 +1117,10 @@ func repoProviderText(provider string) string {
 }
 
 func (b *Bot) sendDNSDetails(ctx context.Context, chatID int64, data string) {
+	b.sendDNSDetailsTarget(ctx, chatID, data, nil)
+}
+
+func (b *Bot) sendDNSDetailsTarget(ctx context.Context, chatID int64, data string, target *models.Message) {
 	b.mu.Lock()
 	p := b.sessions[chatID]
 	var domainName string
@@ -1024,12 +1129,12 @@ func (b *Bot) sendDNSDetails(ctx context.Context, chatID int64, data string) {
 	}
 	b.mu.Unlock()
 	if domainName == "" {
-		b.send(ctx, chatID, "查询结果已过期，请重新查询域名。", homeMenu())
+		b.sendTarget(ctx, chatID, target, "查询结果已过期，请重新查询域名。", homeEditMenu())
 		return
 	}
 	result, err := b.service.Query(ctx, domainName)
 	if err != nil {
-		b.send(ctx, chatID, "读取 DNS 详情失败："+err.Error(), homeMenu())
+		b.sendTarget(ctx, chatID, target, "读取 DNS 详情失败："+err.Error(), homeEditMenu())
 		return
 	}
 	geo := make(map[string]lookup.GeoIPInfo, len(result.Network.GeoIPs))
@@ -1047,7 +1152,7 @@ func (b *Bot) sendDNSDetails(ctx context.Context, chatID int64, data string) {
 		out.WriteString("\n🌍 国外 DNS\n")
 		appendDNSGroupDetails(&out, result.Network.Foreign, geo, &shown)
 	}
-	b.send(ctx, chatID, out.String(), homeMenu())
+	b.sendTarget(ctx, chatID, target, out.String(), homeEditMenu())
 }
 
 func appendDNSGroupDetails(out *strings.Builder, group lookup.DNSGroupResult, geo map[string]lookup.GeoIPInfo, shown *int) {
@@ -1190,10 +1295,12 @@ func displayDNSProvider(provider string) string {
 
 func geoPlace(info lookup.GeoIPInfo) string {
 	parts := make([]string, 0, 5)
-	if info.Country != "" {
-		parts = append(parts, info.Country)
-	} else if info.CountryCode != "" {
-		parts = append(parts, info.CountryCode)
+	country := strings.TrimSpace(info.Country)
+	if country == "" {
+		country = strings.TrimSpace(info.CountryCode)
+	}
+	if country != "" {
+		parts = append(parts, countryFlag(info.CountryCode)+" "+country)
 	}
 	if info.Region != "" {
 		parts = append(parts, info.Region)
@@ -1217,6 +1324,14 @@ func geoPlace(info lookup.GeoIPInfo) string {
 		return "未知地域"
 	}
 	return strings.Join(parts, " · ")
+}
+
+func countryFlag(code string) string {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if len(code) != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' {
+		return "🌐"
+	}
+	return string([]rune{rune(0x1F1E6) + rune(code[0]-'A'), rune(0x1F1E6) + rune(code[1]-'A')})
 }
 
 func geoSuggestion(report lookup.Report) (string, string) {
