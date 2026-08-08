@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +66,8 @@ type button struct {
 	Text string
 	Data string
 }
+
+var visibleDomainPattern = regexp.MustCompile(`(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?`)
 
 func New(service *app.Service, cfg config.Config) (*Bot, error) {
 	b := &Bot{
@@ -1211,7 +1215,8 @@ func (b *Bot) send(ctx context.Context, chatID int64, text string, kb models.Rep
 }
 
 func (b *Bot) sendProgress(ctx context.Context, chatID int64, text string) *models.Message {
-	msg, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text})
+	entities := addDomainCodeEntities(text, nil)
+	msg, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text, Entities: entities})
 	if err != nil {
 		log.Printf("telegram progress send: %v", err)
 		return nil
@@ -1233,6 +1238,7 @@ func (b *Bot) sendTargetMode(ctx context.Context, chatID int64, target *models.M
 }
 
 func (b *Bot) sendTargetModeEntities(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup, entities []models.MessageEntity, push bool) {
+	entities = addDomainCodeEntities(text, entities)
 	previewDisabled := true
 	preview := &models.LinkPreviewOptions{IsDisabled: &previewDisabled}
 	if target != nil {
@@ -1253,6 +1259,55 @@ func (b *Bot) sendTargetModeEntities(ctx context.Context, chatID int64, target *
 	if msg != nil {
 		b.recordPage(chatID, msg.ID, text, kb, entities, push)
 	}
+}
+
+func addDomainCodeEntities(text string, existing []models.MessageEntity) []models.MessageEntity {
+	entities := append([]models.MessageEntity(nil), existing...)
+	for _, location := range visibleDomainPattern.FindAllStringIndex(text, -1) {
+		start, end := location[0], location[1]
+		token := text[start:end]
+		if net.ParseIP(token) != nil || domainIsPartOfURLOrEmail(text, start) {
+			continue
+		}
+		offset := telegramTextLength(text[:start])
+		length := telegramTextLength(token)
+		if overlapsEntity(offset, length, entities) {
+			continue
+		}
+		entities = append(entities, models.MessageEntity{
+			Type:   models.MessageEntityTypeCode,
+			Offset: offset,
+			Length: length,
+		})
+	}
+	sort.SliceStable(entities, func(i, j int) bool {
+		if entities[i].Offset != entities[j].Offset {
+			return entities[i].Offset < entities[j].Offset
+		}
+		return entities[i].Length > entities[j].Length
+	})
+	return entities
+}
+
+func domainIsPartOfURLOrEmail(text string, start int) bool {
+	if start > 0 && text[start-1] == '@' {
+		return true
+	}
+	prefix := text[:start]
+	separator := strings.LastIndexAny(prefix, " \t\r\n")
+	currentToken := prefix[separator+1:]
+	return strings.Contains(currentToken, "://")
+}
+
+func overlapsEntity(offset, length int, entities []models.MessageEntity) bool {
+	end := offset + length
+	for _, entity := range entities {
+		entityEnd := entity.Offset + entity.Length
+		if offset < entityEnd && entity.Offset < end {
+			return true
+		}
+	}
+	return false
 }
 
 func callbackMessage(query *models.CallbackQuery) *models.Message {

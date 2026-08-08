@@ -285,6 +285,48 @@ func TestWhoisEntitiesSkipUnknownRegistrableDomain(t *testing.T) {
 	}
 }
 
+func TestDomainTextUsesCodeEntitiesInsteadOfAccidentalLinks(t *testing.T) {
+	text := "🔍 输入域名：jww.ychb2.xyz\n🛡️ 安全主域名：ychb2.xyz\n📋 规则：DOMAIN-SUFFIX,jww.ychb2.xyz"
+	entities := addDomainCodeEntities(text, nil)
+	if len(entities) != 3 {
+		t.Fatalf("expected every displayed domain occurrence to be code-formatted: %#v", entities)
+	}
+	for _, entity := range entities {
+		if entity.Type != models.MessageEntityTypeCode {
+			t.Fatalf("unexpected automatic link entity: %#v", entity)
+		}
+	}
+}
+
+func TestDomainEntityKeepsRealURLsClickable(t *testing.T) {
+	text := "规则仓库：https://gitlab.com/someme/rules\n示例：example.com"
+	entities := addDomainCodeEntities(text, nil)
+	if len(entities) != 1 || entities[0].Type != models.MessageEntityTypeCode {
+		t.Fatalf("URL host must remain a real link while bare examples become code: %#v", entities)
+	}
+	if entities[0].Offset != telegramTextLength("规则仓库：https://gitlab.com/someme/rules\n示例：") {
+		t.Fatalf("wrong domain code entity offset: %#v", entities[0])
+	}
+}
+
+func TestDomainCodeDoesNotOverrideWhoisLinks(t *testing.T) {
+	text := "🔍 查询域名：example.com\n可注册域名：example.com\n规则：cdn.example.com"
+	whois := whoisEntities(text, "example.com", "example.com")
+	entities := addDomainCodeEntities(text, whois)
+	textLinks, code := 0, 0
+	for _, entity := range entities {
+		switch entity.Type {
+		case models.MessageEntityTypeTextLink:
+			textLinks++
+		case models.MessageEntityTypeCode:
+			code++
+		}
+	}
+	if textLinks != 2 || code != 1 {
+		t.Fatalf("WHOIS links and non-link domain formatting were not preserved: %#v", entities)
+	}
+}
+
 func TestDNSDetailsHaveExplicitSectionBreaks(t *testing.T) {
 	var out strings.Builder
 	shown := 0
