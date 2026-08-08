@@ -1,0 +1,15 @@
+services:
+  clashrulepilot:
+    image: guanren/clashrulepilot:latest
+    pull_policy: always
+    container_name: clashrulepilot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
