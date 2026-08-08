@@ -68,6 +68,8 @@ type button struct {
 }
 
 var visibleDomainPattern = regexp.MustCompile(`(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?`)
+var visibleRuleTokenPattern = regexp.MustCompile(`(?i)\b(?:DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN-WILDCARD|DOMAIN-REGEX),[^\s，；]+`)
+var gitHashPattern = regexp.MustCompile(`(?i)^[0-9a-f]{7,64}$`)
 
 func New(service *app.Service, cfg config.Config) (*Bot, error) {
 	b := &Bot{
@@ -828,6 +830,7 @@ func (b *Bot) queryTarget(ctx context.Context, chatID int64, domainName string, 
 	}
 	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n🧱 GEOSITE:GFW：%s\n\n%s\n可注册域名：%s\n📡 中国大陆信号：%s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), dnsText, root, chinaSignal)
 	entities := whoisEntities(text, domainName, root)
+	entities = append(entities, exactTextLinkEntities(text, "Aethersailor", upstreamRepositoryURL(b.cfg.UpstreamRepo))...)
 	if geoText != "" {
 		text += "\n" + geoText
 	}
@@ -898,6 +901,42 @@ func whoisEntities(text, domainName, registrable string) []models.MessageEntity 
 		})
 	}
 	return entities
+}
+
+func exactTextLinkEntities(text, label, targetURL string) []models.MessageEntity {
+	if label == "" || targetURL == "" {
+		return nil
+	}
+	start := strings.Index(text, label)
+	if start < 0 {
+		return nil
+	}
+	return []models.MessageEntity{{
+		Type:   models.MessageEntityTypeTextLink,
+		Offset: telegramTextLength(text[:start]),
+		Length: telegramTextLength(label),
+		URL:    targetURL,
+	}}
+}
+
+func upstreamRepositoryURL(repo string) string {
+	repo = strings.Trim(repo, "/")
+	if repo == "" {
+		return ""
+	}
+	return (&url.URL{Scheme: "https", Host: "github.com", Path: "/" + repo}).String()
+}
+
+func upstreamCommitURL(repo, sha string) string {
+	sha = strings.TrimSpace(sha)
+	if !gitHashPattern.MatchString(sha) {
+		return ""
+	}
+	base := upstreamRepositoryURL(repo)
+	if base == "" {
+		return ""
+	}
+	return base + "/commit/" + sha
 }
 
 func telegramTextLength(value string) int {
@@ -1033,7 +1072,14 @@ func (b *Bot) statusTarget(ctx context.Context, chatID int64, target *models.Mes
 	default:
 		upstream += "\n状态：未检查"
 	}
-	b.sendTarget(ctx, chatID, target, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n👤 个人规则：%d 条%s\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n上游公开镜像：%t\n\n%s", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), storeNote, idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, b.service.SyncEnabled(), upstream), homeEditMenu())
+	text := fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n👤 个人规则：%d 条%s\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n上游公开镜像：%t\n\n%s", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), storeNote, idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, b.service.SyncEnabled(), upstream)
+	entities := exactTextLinkEntities(text, b.cfg.RuleRepoProject, b.service.RepoWebURL())
+	entities = append(entities, exactTextLinkEntities(text, b.cfg.UpstreamRepo, upstreamRepositoryURL(b.cfg.UpstreamRepo))...)
+	indexedCommitURL := upstreamCommitURL(b.cfg.UpstreamRepo, indexedSHA)
+	entities = append(entities, exactTextLinkEntities(text, short(ruleVersion), indexedCommitURL)...)
+	entities = append(entities, exactTextLinkEntities(text, short(indexedSHA), indexedCommitURL)...)
+	entities = append(entities, exactTextLinkEntities(text, short(idx.UpstreamSHA), upstreamCommitURL(b.cfg.UpstreamRepo, idx.UpstreamSHA))...)
+	b.sendTargetModeEntities(ctx, chatID, target, text, homeEditMenu(), entities, true)
 }
 
 func (b *Bot) helpText() string {
@@ -1263,10 +1309,22 @@ func (b *Bot) sendTargetModeEntities(ctx context.Context, chatID int64, target *
 
 func addDomainCodeEntities(text string, existing []models.MessageEntity) []models.MessageEntity {
 	entities := append([]models.MessageEntity(nil), existing...)
-	for _, location := range visibleDomainPattern.FindAllStringIndex(text, -1) {
+	entities = appendCodeEntities(text, visibleRuleTokenPattern.FindAllStringIndex(text, -1), entities, false)
+	entities = appendCodeEntities(text, visibleDomainPattern.FindAllStringIndex(text, -1), entities, true)
+	sort.SliceStable(entities, func(i, j int) bool {
+		if entities[i].Offset != entities[j].Offset {
+			return entities[i].Offset < entities[j].Offset
+		}
+		return entities[i].Length > entities[j].Length
+	})
+	return entities
+}
+
+func appendCodeEntities(text string, locations [][]int, entities []models.MessageEntity, validateDomain bool) []models.MessageEntity {
+	for _, location := range locations {
 		start, end := location[0], location[1]
 		token := text[start:end]
-		if net.ParseIP(token) != nil || domainIsPartOfURLOrEmail(text, start) {
+		if validateDomain && (net.ParseIP(token) != nil || domainIsPartOfURLOrEmail(text, start)) {
 			continue
 		}
 		offset := telegramTextLength(text[:start])
@@ -1280,12 +1338,6 @@ func addDomainCodeEntities(text string, existing []models.MessageEntity) []model
 			Length: length,
 		})
 	}
-	sort.SliceStable(entities, func(i, j int) bool {
-		if entities[i].Offset != entities[j].Offset {
-			return entities[i].Offset < entities[j].Offset
-		}
-		return entities[i].Length > entities[j].Length
-	})
 	return entities
 }
 

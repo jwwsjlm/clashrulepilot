@@ -327,6 +327,76 @@ func TestDomainCodeDoesNotOverrideWhoisLinks(t *testing.T) {
 	}
 }
 
+func TestUpstreamRepositoryNameLinksToGitHub(t *testing.T) {
+	const repo = "Aethersailor/Custom_OpenClash_Rules"
+	text := "📦 上游规则\n仓库：" + repo
+	entities := exactTextLinkEntities(text, repo, upstreamRepositoryURL(repo))
+	if len(entities) != 1 {
+		t.Fatalf("expected upstream repository link: %#v", entities)
+	}
+	entity := entities[0]
+	if entity.Type != models.MessageEntityTypeTextLink || entity.URL != "https://github.com/Aethersailor/Custom_OpenClash_Rules" {
+		t.Fatalf("unexpected upstream repository entity: %#v", entity)
+	}
+	if entity.Offset != telegramTextLength("📦 上游规则\n仓库：") || entity.Length != telegramTextLength(repo) {
+		t.Fatalf("unexpected upstream repository link offsets: %#v", entity)
+	}
+}
+
+func TestCommitResultRuleAndCoverageAreNotLinks(t *testing.T) {
+	text := "✅ 规则已提交\n\n动作：🔴 代理\n规则：DOMAIN-SUFFIX,api.chatanywhere.cn\n覆盖：api.chatanywhere.cn 以及所有下级域名\ncommit：abc123"
+	entities := addDomainCodeEntities(text, nil)
+	if len(entities) != 2 {
+		t.Fatalf("expected one rule token and one coverage domain code entity: %#v", entities)
+	}
+	for _, entity := range entities {
+		if entity.Type != models.MessageEntityTypeCode {
+			t.Fatalf("commit result must not contain an accidental link: %#v", entity)
+		}
+	}
+	if entities[0].Length != telegramTextLength("DOMAIN-SUFFIX,api.chatanywhere.cn") {
+		t.Fatalf("the complete rule token should use code formatting: %#v", entities[0])
+	}
+	if entities[1].Length != telegramTextLength("api.chatanywhere.cn") {
+		t.Fatalf("the coverage domain should use code formatting: %#v", entities[1])
+	}
+}
+
+func TestPublishedRepositoryLinksToConfiguredWebPage(t *testing.T) {
+	const project = "someme/clashrulepilot-rules"
+	text := "发布仓库：" + project + " (gitlab)"
+	entities := exactTextLinkEntities(text, project, "https://gitlab.com/someme/clashrulepilot-rules")
+	if len(entities) != 1 || entities[0].Type != models.MessageEntityTypeTextLink {
+		t.Fatalf("published repository should be an intentional link: %#v", entities)
+	}
+	if entities[0].URL != "https://gitlab.com/someme/clashrulepilot-rules" {
+		t.Fatalf("wrong published repository URL: %#v", entities[0])
+	}
+}
+
+func TestIndexVersionLinksToItsSourceCommit(t *testing.T) {
+	const (
+		repo        = "Aethersailor/Custom_OpenClash_Rules"
+		ruleVersion = "d6f9cb7dfdf5"
+		commitSHA   = "019654c13fe31234567890123456789012345678"
+	)
+	commitURL := upstreamCommitURL(repo, commitSHA)
+	if commitURL != "https://github.com/Aethersailor/Custom_OpenClash_Rules/commit/019654c13fe31234567890123456789012345678" {
+		t.Fatalf("wrong upstream commit URL: %q", commitURL)
+	}
+	text := "当前索引版本：" + ruleVersion + "\n索引对应提交：" + short(commitSHA)
+	entities := exactTextLinkEntities(text, ruleVersion, commitURL)
+	entities = append(entities, exactTextLinkEntities(text, short(commitSHA), commitURL)...)
+	if len(entities) != 2 {
+		t.Fatalf("both index version hashes should link to the source commit: %#v", entities)
+	}
+	for _, entity := range entities {
+		if entity.Type != models.MessageEntityTypeTextLink || entity.URL != commitURL {
+			t.Fatalf("unexpected index version entity: %#v", entity)
+		}
+	}
+}
+
 func TestDNSDetailsHaveExplicitSectionBreaks(t *testing.T) {
 	var out strings.Builder
 	shown := 0
