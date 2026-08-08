@@ -3,7 +3,9 @@ package bot
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"clashrulepilot/internal/lookup"
 	"clashrulepilot/internal/rules"
@@ -240,5 +242,90 @@ func TestGeoPlaceIncludesCountryFlag(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("geoPlace missing %q: %s", want, got)
 		}
+	}
+}
+
+func TestCountryLabelIncludesChineseNameAndMaintainedFlag(t *testing.T) {
+	got := countryLabel("US", "United States")
+	for _, want := range []string{"🇺🇸", "United States", "美国"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("countryLabel missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestSmartSuggestionDoesNotRepeatExistingProxyRule(t *testing.T) {
+	decision := smartSuggestion([]rules.Rule{{Domain: "example.com", Match: rules.Suffix, Action: rules.Proxy}}, lookup.Report{
+		ChinaChecked: 1,
+		GeoIPs:       []lookup.GeoIPInfo{{IP: "8.8.8.8", CountryCode: "US"}},
+	})
+	if decision.ButtonAction != rules.Direct {
+		t.Fatalf("expected optional switch to direct, got %+v", decision)
+	}
+	if !strings.Contains(decision.Text, "当前个人规则已经是🔴 代理") || strings.Contains(decision.ButtonText, "添加代理") {
+		t.Fatalf("suggestion repeated the existing proxy action: %+v", decision)
+	}
+	if decision.ButtonText != "🟢 切换为直连（不建议）" {
+		t.Fatalf("unexpected switch label: %q", decision.ButtonText)
+	}
+}
+
+func TestSmartSuggestionKeepsMatchingPersonalRuleWithoutButton(t *testing.T) {
+	decision := smartSuggestion([]rules.Rule{{Domain: "example.com", Match: rules.Exact, Action: rules.Direct}}, lookup.Report{
+		ChinaChecked: 1,
+		China:        true,
+		GeoIPs:       []lookup.GeoIPInfo{{IP: "1.2.3.4", CountryCode: "CN", China: true}},
+	})
+	if decision.ButtonAction != "" || !strings.Contains(decision.Text, "无需重复添加") {
+		t.Fatalf("matching personal rule should be kept without duplicate action: %+v", decision)
+	}
+}
+
+func TestPageStackKeepsMostRecentFivePages(t *testing.T) {
+	b := &Bot{sessions: map[int64]*pending{1: {Mode: "view"}}}
+	for i := 0; i < 8; i++ {
+		b.recordPage(1, i+1, string(rune('A'+i)), homeEditMenu(), true)
+	}
+	p := b.sessions[1]
+	if len(p.PageStack) != 5 {
+		t.Fatalf("expected five page snapshots, got %d", len(p.PageStack))
+	}
+	if p.PageStack[0].Text != "C" || p.PageStack[4].Text != "G" {
+		t.Fatalf("page stack did not retain the most recent pages: %+v", p.PageStack)
+	}
+}
+
+func TestCallbackDedupeIsConcurrentSafe(t *testing.T) {
+	b := &Bot{seenCallbacks: map[string]time.Time{}}
+	var wg sync.WaitGroup
+	var accepted int
+	var mu sync.Mutex
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !b.callbackAlreadyHandled("same-callback") {
+				mu.Lock()
+				accepted++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if accepted != 1 {
+		t.Fatalf("callback should be accepted once, got %d", accepted)
+	}
+}
+
+func TestSessionOwnerIsolation(t *testing.T) {
+	b := &Bot{sessions: map[int64]*pending{}}
+	if !b.bindSessionOwner(100, 1) {
+		t.Fatal("first owner should bind")
+	}
+	if b.bindSessionOwner(100, 2) {
+		t.Fatal("another user must not take over the same session")
+	}
+	if !b.bindSessionOwner(200, 2) {
+		t.Fatal("different chat should remain isolated")
 	}
 }

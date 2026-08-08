@@ -14,7 +14,7 @@
 - 删除个人规则和将已有规则在直连/代理分组之间移动时，Bot 会先列出受影响规则并要求二次确认；重复点击不会重复提交。
 - GitHub Trees API 或 GitLab Commits API 原子提交，避免多文件半更新。
 
-外部服务协议优先使用成熟开源库：Telegram 使用 `go-telegram/bot`，GitHub 使用 `google/go-github`，GitLab 使用官方 `api/client-go`，YAML 使用 `goccy/go-yaml`，GeoIP HTTPS 使用你的 `jwwsjlm/req/v3`，其他下载重试使用 `go-retryablehttp`。完整版本和许可证见 [docs/open-source-dependencies.md](docs/open-source-dependencies.md)。
+外部服务协议优先使用成熟开源库：Telegram 使用 `go-telegram/bot`，国家代码与国旗使用 `biter777/countries`，中文国家名使用 `golang.org/x/text`，GitHub 使用 `google/go-github`，GitLab 使用官方 `api/client-go`，YAML 使用 `goccy/go-yaml`，GeoIP HTTPS 使用你的 `jwwsjlm/req/v3`，其他下载重试使用 `go-retryablehttp`。完整版本和许可证见 [docs/open-source-dependencies.md](docs/open-source-dependencies.md)。
 
 ## 启动
 

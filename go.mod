@@ -3,15 +3,18 @@ module clashrulepilot
 go 1.26.4
 
 require (
+	github.com/biter777/countries v1.7.5
 	github.com/go-telegram/bot v1.23.0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/google/go-github/v81 v81.0.0
 	github.com/hashicorp/go-retryablehttp v0.7.8
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/jwwsjlm/req/v3 v3.58.5
 	github.com/robfig/cron/v3 v3.0.1
 	gitlab.com/gitlab-org/api/client-go v1.46.0
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/net v0.57.0
+	golang.org/x/text v0.40.0
 )
 
 require (
@@ -27,7 +30,6 @@ require (
 	github.com/google/pprof v0.0.0-20260604005048-7023385849c0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/icholy/digest v1.2.0 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/onsi/ginkgo/v2 v2.32.0 // indirect
@@ -43,7 +45,6 @@ require (
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 	gotest.tools/v3 v3.5.2 // indirect

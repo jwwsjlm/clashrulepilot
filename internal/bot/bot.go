@@ -15,16 +15,26 @@ import (
 	"clashrulepilot/internal/lookup"
 	"clashrulepilot/internal/ruleindex"
 	"clashrulepilot/internal/rules"
+	"github.com/biter777/countries"
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"golang.org/x/text/language"
+	"golang.org/x/text/language/display"
 )
 
 type Bot struct {
-	service  *app.Service
-	cfg      config.Config
-	api      *tgbot.Bot
-	sessions map[int64]*pending
-	mu       sync.Mutex
+	service       *app.Service
+	cfg           config.Config
+	api           *tgbot.Bot
+	sessions      map[int64]*pending
+	seenCallbacks map[string]time.Time
+	chatLocks     sync.Map
+	mu            sync.Mutex
+}
+
+type pageSnapshot struct {
+	Text   string
+	Markup models.ReplyMarkup
 }
 
 type pending struct {
@@ -40,6 +50,11 @@ type pending struct {
 	Busy            bool
 	Candidates      []string
 	DeleteRules     []rules.Rule
+	QueryResult     *app.QueryResult
+	UserID          int64
+	ActiveMessageID int
+	CurrentPage     *pageSnapshot
+	PageStack       []pageSnapshot
 }
 
 type button struct {
@@ -49,16 +64,16 @@ type button struct {
 
 func New(service *app.Service, cfg config.Config) (*Bot, error) {
 	b := &Bot{
-		service:  service,
-		cfg:      cfg,
-		sessions: make(map[int64]*pending),
+		service:       service,
+		cfg:           cfg,
+		sessions:      make(map[int64]*pending),
+		seenCallbacks: make(map[string]time.Time),
 	}
 	api, err := tgbot.New(cfg.TelegramToken,
 		tgbot.WithDefaultHandler(b.handle),
 		tgbot.WithErrorsHandler(func(err error) { log.Printf("telegram library: %v", err) }),
 		tgbot.WithCheckInitTimeout(10*time.Second),
 		tgbot.WithAllowedUpdates(tgbot.AllowedUpdates{"message", "callback_query"}),
-		tgbot.WithNotAsyncHandlers(),
 	)
 	if err != nil {
 		return nil, err
@@ -96,7 +111,10 @@ func (b *Bot) handle(ctx context.Context, _ *tgbot.Bot, item *models.Update) {
 		log.Printf("telegram message rejected from=%d chat_type=%s", item.Message.From.ID, item.Message.Chat.Type)
 		return
 	}
+	unlock := b.lockChat(item.Message.Chat.ID)
+	defer unlock()
 	text := strings.TrimSpace(item.Message.Text)
+	b.bindSessionOwner(item.Message.Chat.ID, item.Message.From.ID)
 	log.Printf("telegram message accepted update_id=%d from=%d chat=%d text=%q", item.ID, item.Message.From.ID, item.Message.Chat.ID, text)
 	if b.handlePendingText(ctx, item.Message.Chat.ID, text) {
 		return
@@ -118,9 +136,7 @@ func (b *Bot) handle(ctx context.Context, _ *tgbot.Bot, item *models.Update) {
 		} else if len(candidates) == 1 {
 			b.query(ctx, item.Message.Chat.ID, candidates[0])
 		} else {
-			b.mu.Lock()
-			b.sessions[item.Message.Chat.ID] = &pending{Mode: "query", Candidates: candidates}
-			b.mu.Unlock()
+			b.replaceSession(item.Message.Chat.ID, &pending{Mode: "query", Candidates: candidates, UserID: item.Message.From.ID})
 			rows := make([][]button, 0, len(candidates)+1)
 			for n, candidate := range candidates {
 				if n >= 8 {
@@ -211,7 +227,6 @@ func (b *Bot) acceptDomainTarget(ctx context.Context, chatID int64, p *pending, 
 		p.RootDomain = domain.RuleRoot(domainName)
 		b.showMatchMenuTarget(ctx, chatID, p, target)
 	case "query":
-		b.clear(chatID)
 		b.query(ctx, chatID, domainName)
 	case "remove":
 		b.removeDomain(ctx, chatID, domainName)
@@ -347,9 +362,7 @@ func (b *Bot) startAddMode(ctx context.Context, chatID int64, action rules.Actio
 }
 
 func (b *Bot) startAddModeTarget(ctx context.Context, chatID int64, action rules.Action, target *models.Message) {
-	b.mu.Lock()
-	b.sessions[chatID] = &pending{Mode: "add", Action: action}
-	b.mu.Unlock()
+	b.replaceSession(chatID, &pending{Mode: "add", Action: action})
 	actionText := "直连"
 	if action == rules.Proxy {
 		actionText = "代理"
@@ -362,9 +375,7 @@ func (b *Bot) startQueryMode(ctx context.Context, chatID int64) {
 }
 
 func (b *Bot) startQueryModeTarget(ctx context.Context, chatID int64, target *models.Message) {
-	b.mu.Lock()
-	b.sessions[chatID] = &pending{Mode: "query"}
-	b.mu.Unlock()
+	b.replaceSession(chatID, &pending{Mode: "query"})
 	b.sendTarget(ctx, chatID, target, "请输入要查询的域名或 URL，例如：example.com", cancelMenu())
 }
 
@@ -373,9 +384,7 @@ func (b *Bot) startRemoveMode(ctx context.Context, chatID int64) {
 }
 
 func (b *Bot) startRemoveModeTarget(ctx context.Context, chatID int64, target *models.Message) {
-	b.mu.Lock()
-	b.sessions[chatID] = &pending{Mode: "remove"}
-	b.mu.Unlock()
+	b.replaceSession(chatID, &pending{Mode: "remove"})
 	b.sendTarget(ctx, chatID, target, "请输入要删除的域名或 URL：", cancelMenu())
 }
 
@@ -389,9 +398,7 @@ func (b *Bot) addStart(ctx context.Context, chatID int64, parts []string) {
 		b.send(ctx, chatID, "域名无效："+err.Error(), homeMenu())
 		return
 	}
-	b.mu.Lock()
-	b.sessions[chatID] = &pending{Mode: "add", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
-	b.mu.Unlock()
+	b.replaceSession(chatID, &pending{Mode: "add", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)})
 	b.send(ctx, chatID, "请选择规则动作：", keyboard([][]button{
 		{{Text: "🟢 直连", Data: "route:direct"}, {Text: "🔴 代理", Data: "route:proxy"}},
 		{{Text: "✖️ 取消", Data: "nav:cancel"}},
@@ -403,12 +410,23 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 	if query == nil || message == nil {
 		return
 	}
+	unlock := b.lockChat(message.Chat.ID)
+	defer unlock()
 	if !b.allowed(query.From.ID, message.Chat.Type == models.ChatTypePrivate) {
 		log.Printf("telegram callback rejected from=%d chat_type=%s", query.From.ID, message.Chat.Type)
 		return
 	}
+	if b.callbackAlreadyHandled(query.ID) {
+		b.answer(ctx, query.ID)
+		log.Printf("telegram callback deduplicated id=%s from=%d data=%q", query.ID, query.From.ID, query.Data)
+		return
+	}
 	b.answer(ctx, query.ID)
 	chatID := message.Chat.ID
+	if !b.bindSessionOwner(chatID, query.From.ID) {
+		log.Printf("telegram session ownership mismatch chat=%d from=%d", chatID, query.From.ID)
+		return
+	}
 
 	switch query.Data {
 	case "menu:query":
@@ -424,28 +442,31 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		b.startRemoveModeTarget(ctx, chatID, message)
 		return
 	case "menu:list":
-		b.clear(chatID)
+		b.resetViewSession(chatID, query.From.ID)
 		b.listTarget(ctx, chatID, message)
 		return
 	case "menu:status":
-		b.clear(chatID)
+		b.resetViewSession(chatID, query.From.ID)
 		b.statusTarget(ctx, chatID, message)
 		return
 	case "menu:repo":
-		b.clear(chatID)
+		b.resetViewSession(chatID, query.From.ID)
 		b.repoTarget(ctx, chatID, message)
 		return
 	case "menu:help":
-		b.clear(chatID)
+		b.resetViewSession(chatID, query.From.ID)
 		b.sendTarget(ctx, chatID, message, b.helpText(), homeEditMenu())
 		return
 	case "nav:home:edit":
-		b.clear(chatID)
+		b.resetViewSession(chatID, query.From.ID)
 		b.sendTarget(ctx, chatID, message, b.welcomeText(), mainMenu())
 		return
 	case "nav:home":
 		b.clear(chatID)
 		b.send(ctx, chatID, b.welcomeText(), mainMenu())
+		return
+	case "nav:back":
+		b.back(ctx, chatID, message)
 		return
 	case "nav:cancel", "cancel", "confirm:no":
 		b.clear(chatID)
@@ -461,13 +482,13 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 	pendingRule := b.sessions[chatID]
 	b.mu.Unlock()
 	if pendingRule == nil {
-		b.send(ctx, chatID, "操作已过期，请返回主菜单重新开始。", homeMenu())
+		b.send(ctx, chatID, "操作已过期，请返回主菜单重新开始。", errorMenu())
 		return
 	}
 	if strings.HasPrefix(query.Data, "domain:pick:") {
 		var n int
 		if _, err := fmt.Sscanf(query.Data, "domain:pick:%d", &n); err != nil || n < 0 || n >= len(pendingRule.Candidates) {
-			b.send(ctx, chatID, "域名候选已过期，请重新发送。", cancelMenu())
+			b.send(ctx, chatID, "域名候选已过期，请重新发送。", errorMenu())
 			return
 		}
 		domainName := pendingRule.Candidates[n]
@@ -554,7 +575,7 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		return
 	default:
 		log.Printf("telegram callback ignored: unknown data=%q", query.Data)
-		b.send(ctx, chatID, "无法识别这个按钮，请返回主菜单。", homeMenu())
+		b.send(ctx, chatID, "无法识别这个按钮，请返回主菜单。", errorMenu())
 		return
 	}
 
@@ -565,6 +586,35 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 	if pendingRule.Action != "" && pendingRule.Match != "" {
 		b.commitPending(ctx, chatID, query.From.ID, pendingRule, false)
 	}
+}
+
+func (b *Bot) lockChat(chatID int64) func() {
+	value, _ := b.chatLocks.LoadOrStore(chatID, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
+}
+
+func (b *Bot) callbackAlreadyHandled(id string) bool {
+	if id == "" {
+		return false
+	}
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.seenCallbacks == nil {
+		b.seenCallbacks = make(map[string]time.Time)
+	}
+	for key, at := range b.seenCallbacks {
+		if now.Sub(at) > 10*time.Minute {
+			delete(b.seenCallbacks, key)
+		}
+	}
+	if _, ok := b.seenCallbacks[id]; ok {
+		return true
+	}
+	b.seenCallbacks[id] = now
+	return false
 }
 
 func toRule(p *pending, userID int64) rules.Rule {
@@ -597,9 +647,7 @@ func (b *Bot) removeDomain(ctx context.Context, chatID int64, domainName string)
 		b.send(ctx, chatID, "删除失败：未找到该域名对应的个人规则。", homeMenu())
 		return
 	}
-	b.mu.Lock()
-	b.sessions[chatID] = &pending{Mode: "remove_confirm", Domain: domainName, OriginalDomain: domainName, DeleteRules: matched}
-	b.mu.Unlock()
+	b.replaceSession(chatID, &pending{Mode: "remove_confirm", Domain: domainName, OriginalDomain: domainName, DeleteRules: matched})
 	b.send(ctx, chatID, removalConfirmationText(domainName, matched), keyboard([][]button{
 		{{Text: "🗑️ 确认删除", Data: "remove:confirm"}, {Text: "✖️ 取消", Data: "nav:cancel"}},
 	}))
@@ -681,7 +729,7 @@ func removalConfirmationText(domainName string, matched []rules.Rule) string {
 func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	result, err := b.service.Query(ctx, domainName)
 	if err != nil {
-		b.send(ctx, chatID, "查询失败："+err.Error(), homeMenu())
+		b.send(ctx, chatID, "查询失败："+err.Error(), errorMenu())
 		return
 	}
 	personal := "未找到"
@@ -743,7 +791,7 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	}
 	dnsText := formatDNSReport(result.Network)
 	geoText := formatGeoIPReport(result.Network)
-	suggestion, suggestionKind := geoSuggestion(result.Network)
+	suggestionDecision := smartSuggestion(result.Personal, result.Network)
 	root := result.Network.Registrable
 	if root == "" {
 		root = "未识别"
@@ -752,22 +800,19 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	if geoText != "" {
 		text += "\n" + geoText
 	}
-	if suggestion != "" {
-		text += "\n" + suggestion
+	if suggestionDecision.Text != "" {
+		text += "\n" + suggestionDecision.Text
 	}
 	rows := [][]button{}
-	if hasProxy {
-		rows = append(rows, []button{{Text: "🟢 覆写为个人直连", Data: "override:direct"}})
-	}
-	if hasDirect {
-		rows = append(rows, []button{{Text: "🔴 覆写为个人代理", Data: "override:proxy"}})
+	if len(result.Personal) == 0 {
+		if hasProxy {
+			rows = append(rows, []button{{Text: "🟢 覆写为个人直连", Data: "override:direct"}})
+		}
+		if hasDirect {
+			rows = append(rows, []button{{Text: "🔴 覆写为个人代理", Data: "override:proxy"}})
+		}
 	}
 	rows = append(rows, []button{{Text: "🏠 主菜单", Data: "nav:home:edit"}})
-	if hasDirect || hasProxy {
-		b.mu.Lock()
-		b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
-		b.mu.Unlock()
-	}
 	if len(result.Network.GeoIPs) > 0 {
 		rows = append(rows, []button{{Text: "📍 查看全部 IP 归属", Data: "dns:details:all"}})
 	}
@@ -777,18 +822,33 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	if len(result.Network.Foreign.A)+len(result.Network.Foreign.AAAA) > 0 {
 		rows = append(rows, []button{{Text: "🌍 查看国外 DNS 详情", Data: "dns:details:foreign"}})
 	}
-	if suggestionKind == "direct" || suggestionKind == "both" {
-		rows = append(rows, []button{{Text: "🟢 建议添加直连", Data: "suggest:direct"}})
+	if suggestionDecision.ButtonAction != "" {
+		upstreamAlreadyHasAction := len(result.Personal) == 0 && ((suggestionDecision.ButtonAction == rules.Direct && hasDirect) || (suggestionDecision.ButtonAction == rules.Proxy && hasProxy))
+		if !upstreamAlreadyHasAction {
+			rows = append(rows, []button{{Text: suggestionDecision.ButtonText, Data: "suggest:" + string(suggestionDecision.ButtonAction)}})
+		}
+	} else if len(result.Personal) == 0 && suggestionDecision.Kind == "both" {
+		rows = append(rows, []button{
+			{Text: "🟢 添加直连（需确认）", Data: "suggest:direct"},
+			{Text: "🔴 添加代理（需确认）", Data: "suggest:proxy"},
+		})
 	}
-	if suggestionKind == "proxy" || suggestionKind == "both" {
-		rows = append(rows, []button{{Text: "🔴 建议添加代理", Data: "suggest:proxy"}})
-	}
-	if len(result.Network.GeoIPs) > 0 || len(result.Network.Domestic.A)+len(result.Network.Domestic.AAAA)+len(result.Network.Foreign.A)+len(result.Network.Foreign.AAAA) > 0 {
-		b.mu.Lock()
-		b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
-		b.mu.Unlock()
-	}
+	b.setQuerySession(chatID, domainName, &result)
 	b.send(ctx, chatID, text, keyboard(rows))
+}
+
+func (b *Bot) setQuerySession(chatID int64, domainName string, result *app.QueryResult) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	previous := b.sessions[chatID]
+	p := &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName), QueryResult: result}
+	if previous != nil {
+		p.CurrentPage = previous.CurrentPage
+		p.PageStack = append([]pageSnapshot(nil), previous.PageStack...)
+		p.ActiveMessageID = previous.ActiveMessageID
+		p.UserID = previous.UserID
+	}
+	b.sessions[chatID] = p
 }
 
 func (b *Bot) list(ctx context.Context, chatID int64) {
@@ -926,6 +986,79 @@ func (b *Bot) repoTarget(ctx context.Context, chatID int64, target *models.Messa
 }
 
 func (b *Bot) clear(id int64) { b.mu.Lock(); delete(b.sessions, id); b.mu.Unlock() }
+func (b *Bot) bindSessionOwner(id, userID int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p := b.sessions[id]
+	if p == nil {
+		b.sessions[id] = &pending{Mode: "view", UserID: userID}
+		return true
+	}
+	if p.UserID != 0 && p.UserID != userID {
+		return false
+	}
+	p.UserID = userID
+	return true
+}
+func (b *Bot) replaceSession(id int64, next *pending) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if current := b.sessions[id]; current != nil {
+		next.ActiveMessageID = current.ActiveMessageID
+		next.CurrentPage = current.CurrentPage
+		next.PageStack = append([]pageSnapshot(nil), current.PageStack...)
+		if next.UserID == 0 {
+			next.UserID = current.UserID
+		}
+	}
+	b.sessions[id] = next
+}
+
+func (b *Bot) resetViewSession(id, userID int64) {
+	b.replaceSession(id, &pending{Mode: "view", UserID: userID})
+}
+
+func (b *Bot) ensureSession(id int64) *pending {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if p := b.sessions[id]; p != nil {
+		return p
+	}
+	p := &pending{Mode: "view"}
+	b.sessions[id] = p
+	return p
+}
+
+func (b *Bot) recordPage(chatID int64, messageID int, text string, kb models.ReplyMarkup, push bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p := b.sessions[chatID]
+	if p == nil {
+		return
+	}
+	if push && p.CurrentPage != nil {
+		p.PageStack = append(p.PageStack, *p.CurrentPage)
+		if len(p.PageStack) > 5 {
+			p.PageStack = append([]pageSnapshot(nil), p.PageStack[len(p.PageStack)-5:]...)
+		}
+	}
+	p.CurrentPage = &pageSnapshot{Text: text, Markup: kb}
+	p.ActiveMessageID = messageID
+}
+
+func (b *Bot) back(ctx context.Context, chatID int64, target *models.Message) {
+	b.mu.Lock()
+	p := b.sessions[chatID]
+	if p == nil || len(p.PageStack) == 0 {
+		b.mu.Unlock()
+		b.sendTarget(ctx, chatID, target, b.welcomeText(), mainMenu())
+		return
+	}
+	previous := p.PageStack[len(p.PageStack)-1]
+	p.PageStack = p.PageStack[:len(p.PageStack)-1]
+	b.mu.Unlock()
+	b.sendTargetNoPush(ctx, chatID, target, previous.Text, previous.Markup)
+}
 func (b *Bot) markBusy(id int64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -972,6 +1105,12 @@ func homeMenu() *models.InlineKeyboardMarkup {
 func homeEditMenu() *models.InlineKeyboardMarkup {
 	return keyboard([][]button{{{Text: "🏠 主菜单", Data: "nav:home:edit"}}})
 }
+func backMenu() *models.InlineKeyboardMarkup {
+	return keyboard([][]button{{{Text: "↩️ 返回", Data: "nav:back"}, {Text: "🏠 主菜单", Data: "nav:home:edit"}}})
+}
+func errorMenu() *models.InlineKeyboardMarkup {
+	return backMenu()
+}
 func cancelMenu() *models.InlineKeyboardMarkup {
 	return keyboard([][]button{{{Text: "✖️ 取消", Data: "nav:cancel"}, {Text: "🏠 主菜单", Data: "nav:home:edit"}}})
 }
@@ -980,20 +1119,32 @@ func (b *Bot) send(ctx context.Context, chatID int64, text string, kb models.Rep
 }
 
 func (b *Bot) sendTarget(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup) {
+	b.sendTargetMode(ctx, chatID, target, text, kb, true)
+}
+
+func (b *Bot) sendTargetNoPush(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup) {
+	b.sendTargetMode(ctx, chatID, target, text, kb, false)
+}
+
+func (b *Bot) sendTargetMode(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup, push bool) {
 	if target != nil {
 		if _, err := b.api.EditMessageText(ctx, &tgbot.EditMessageTextParams{ChatID: chatID, MessageID: target.ID, Text: text, ReplyMarkup: kb}); err == nil {
 			log.Printf("telegram message edited chat=%d message=%d", chatID, target.ID)
+			b.recordPage(chatID, target.ID, text, kb, push)
 			return
 		} else {
 			log.Printf("telegram edit failed chat=%d message=%d: %v; falling back to send", chatID, target.ID, err)
 		}
 	}
-	_, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text, ReplyMarkup: kb})
+	msg, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text, ReplyMarkup: kb})
 	if err != nil {
 		log.Printf("telegram send: %v", err)
 		return
 	}
 	log.Printf("telegram message sent chat=%d", chatID)
+	if msg != nil {
+		b.recordPage(chatID, msg.ID, text, kb, push)
+	}
 }
 
 func callbackMessage(query *models.CallbackQuery) *models.Message {
@@ -1127,18 +1278,26 @@ func (b *Bot) sendDNSDetailsTarget(ctx context.Context, chatID int64, data strin
 	b.mu.Lock()
 	p := b.sessions[chatID]
 	var domainName string
+	var cached *app.QueryResult
 	if p != nil {
 		domainName = p.Domain
+		cached = p.QueryResult
 	}
 	b.mu.Unlock()
 	if domainName == "" {
-		b.sendTarget(ctx, chatID, target, "查询结果已过期，请重新查询域名。", homeEditMenu())
+		b.sendTarget(ctx, chatID, target, "查询结果已过期，请重新查询域名。", errorMenu())
 		return
 	}
-	result, err := b.service.Query(ctx, domainName)
-	if err != nil {
-		b.sendTarget(ctx, chatID, target, "读取 DNS 详情失败："+err.Error(), homeEditMenu())
-		return
+	var result app.QueryResult
+	if cached != nil && cached.Domain == domainName {
+		result = *cached
+	} else {
+		queried, err := b.service.Query(ctx, domainName)
+		if err != nil {
+			b.sendTarget(ctx, chatID, target, "读取 DNS 详情失败："+err.Error(), errorMenu())
+			return
+		}
+		result = queried
 	}
 	geo := make(map[string]lookup.GeoIPInfo, len(result.Network.GeoIPs))
 	for _, info := range result.Network.GeoIPs {
@@ -1155,7 +1314,7 @@ func (b *Bot) sendDNSDetailsTarget(ctx context.Context, chatID int64, data strin
 		out.WriteString("\n🌍 国外 DNS\n")
 		appendDNSGroupDetails(&out, result.Network.Foreign, geo, &shown)
 	}
-	b.sendTarget(ctx, chatID, target, out.String(), homeEditMenu())
+	b.sendTarget(ctx, chatID, target, out.String(), backMenu())
 }
 
 func appendDNSGroupDetails(out *strings.Builder, group lookup.DNSGroupResult, geo map[string]lookup.GeoIPInfo, shown *int) {
@@ -1303,7 +1462,7 @@ func geoPlace(info lookup.GeoIPInfo) string {
 		country = strings.TrimSpace(info.CountryCode)
 	}
 	if country != "" {
-		parts = append(parts, countryFlag(info.CountryCode)+" "+country)
+		parts = append(parts, countryLabel(info.CountryCode, country))
 	}
 	if info.Region != "" {
 		parts = append(parts, info.Region)
@@ -1334,10 +1493,124 @@ func countryFlag(code string) string {
 	if len(code) != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' {
 		return "🌐"
 	}
+	if country := countries.ByName(code); country.IsValid() {
+		if flag := country.Emoji(); flag != "" {
+			return flag
+		}
+	}
 	return string([]rune{rune(0x1F1E6) + rune(code[0]-'A'), rune(0x1F1E6) + rune(code[1]-'A')})
 }
 
+func countryLabel(code, fallback string) string {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	flag := countryFlag(code)
+	if len(code) == 2 {
+		if name := display.Regions(language.SimplifiedChinese).Name(language.MustParseRegion(code)); name != "" {
+			if fallback != "" && fallback != name {
+				return fmt.Sprintf("%s %s（%s）", flag, fallback, name)
+			}
+			return flag + " " + name
+		}
+	}
+	if fallback == "" {
+		fallback = "未知国家"
+	}
+	return flag + " " + fallback
+}
+
+type suggestionDecision struct {
+	Text         string
+	Kind         string
+	ButtonAction rules.Action
+	ButtonText   string
+}
+
 func geoSuggestion(report lookup.Report) (string, string) {
+	decision := smartSuggestion(nil, report)
+	return decision.Text, decision.Kind
+}
+
+func smartSuggestion(personal []rules.Rule, report lookup.Report) suggestionDecision {
+	baseText, geoKind := geoSuggestionBase(report)
+	decision := suggestionDecision{Text: baseText, Kind: geoKind}
+	if len(personal) == 0 {
+		if geoKind == "direct" {
+			decision.ButtonAction = rules.Direct
+			decision.ButtonText = "🟢 建议添加直连"
+		} else if geoKind == "proxy" {
+			decision.ButtonAction = rules.Proxy
+			decision.ButtonText = "🔴 建议添加代理"
+		}
+		return decision
+	}
+
+	effective, mixed := effectivePersonalRule(personal)
+	if effective.Action != rules.Direct && effective.Action != rules.Proxy {
+		return decision
+	}
+	current := actionText(effective.Action)
+	opposite := rules.Direct
+	if effective.Action == rules.Direct {
+		opposite = rules.Proxy
+	}
+	oppositeText := actionText(opposite)
+	matchNote := ""
+	if mixed {
+		matchNote = fmt.Sprintf("个人规则存在父子域名重叠，当前按最具体的 %s 规则生效。", current)
+	}
+
+	switch geoKind {
+	case "direct":
+		if effective.Action == rules.Direct {
+			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆，当前个人规则已经是%s，无需重复添加，建议保持现有规则。%s", current, matchNote)
+		} else {
+			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆，当前个人规则为%s，与当前地域判断相反。若访问确实需要直连，可切换为%s；CDN 位置可能变化，请结合实际访问确认。%s", current, actionText(rules.Direct), matchNote)
+			decision.ButtonAction = rules.Direct
+			decision.ButtonText = "🟢 切换为直连（建议）"
+		}
+	case "proxy":
+		if effective.Action == rules.Proxy {
+			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆以外，通常适合%s；当前个人规则已经是%s，无需重复添加，建议保持现有规则。若确实需要调整，可切换为%s（不建议）。%s", actionText(rules.Proxy), current, oppositeText, matchNote)
+			decision.ButtonAction = rules.Direct
+			decision.ButtonText = "🟢 切换为直连（不建议）"
+		} else {
+			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆以外，通常适合%s；当前个人规则为%s。若访问确实需要代理，可切换为%s。CDN 位置可能变化，请结合实际访问确认。%s", actionText(rules.Proxy), current, actionText(rules.Proxy), matchNote)
+			decision.ButtonAction = rules.Proxy
+			decision.ButtonText = "🔴 切换为代理（建议）"
+		}
+	case "both":
+		decision.Text = fmt.Sprintf("💡 建议：当前域名同时解析到中国大陆和境外地址，可能存在 CDN 分流；当前个人规则为%s，建议先保持现有规则，不根据单次解析自动改分组。必要时可切换为%s。%s", current, oppositeText, matchNote)
+		decision.ButtonAction = opposite
+		decision.ButtonText = switchButtonText(opposite, "（可选）")
+	default:
+		decision.Text = fmt.Sprintf("💡 建议：暂时无法根据真实 IP 判断分组；当前个人规则为%s，建议保持现有规则。%s", current, matchNote)
+	}
+	return decision
+}
+
+func switchButtonText(action rules.Action, suffix string) string {
+	if action == rules.Direct {
+		return "🟢 切换为直连" + suffix
+	}
+	return "🔴 切换为代理" + suffix
+}
+
+func effectivePersonalRule(personal []rules.Rule) (rules.Rule, bool) {
+	ordered := rules.Ordered(personal)
+	if len(ordered) == 0 {
+		return rules.Rule{}, false
+	}
+	mixed := false
+	for _, rule := range ordered[1:] {
+		if rule.Action != ordered[0].Action {
+			mixed = true
+			break
+		}
+	}
+	return ordered[0], mixed
+}
+
+func geoSuggestionBase(report lookup.Report) (string, string) {
 	if len(report.GeoIPs) == 0 || report.ChinaChecked == 0 {
 		return "💡 建议：暂时无法根据 IP 地域判断直连或代理。", ""
 	}
