@@ -3,11 +3,14 @@ package gitlab
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
 	gl "gitlab.com/gitlab-org/api/client-go"
 )
 
@@ -25,7 +28,25 @@ func New(baseURL, token, project, branch string) (*Client, error) {
 	if !strings.HasSuffix(apiBase, "/api/v4") {
 		apiBase += "/api/v4"
 	}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     false,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 20 * time.Second,
+		IdleConnTimeout:       30 * time.Second,
+	}
+	httpClient := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	api, err := gl.NewClient(token,
+		gl.WithHTTPClient(httpClient),
+		gl.WithCustomRetry(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+			if err != nil {
+				message := strings.ToLower(err.Error())
+				if errors.Is(err, io.EOF) || strings.Contains(message, "unexpected eof") || strings.Contains(message, "tls") {
+					return true, nil
+				}
+			}
+			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+		}),
 		gl.WithBaseURL(apiBase),
 		gl.WithCustomRetryMax(4),
 		gl.WithCustomRetryWaitMinMax(500*time.Millisecond, 5*time.Second),

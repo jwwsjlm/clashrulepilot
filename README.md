@@ -7,6 +7,7 @@
 - 定时列出 `Aethersailor/Custom_OpenClash_Rules/rule`，只下载当前的 `*_Domain.yaml`，并额外下载 GEOSITE:CN、GEOSITE:GFW 建立本地查询索引；不拉取整个仓库、`.mrs`、IP 或端口规则。
 - 支持从域名、URL、`host:port` 和完整 OpenClash/Mihomo 日志智能提取目标域名。
 - 查询个人规则、Aethersailor、GEOSITE:CN、GEOSITE:GFW、DNS 和大陆 IP 信号；本地返回 Fake-IP 时自动通过公网 DoH 获取真实地址。
+- 个人规则启动时同步到 `/app/data/personal_rules.cache.json`，查询优先使用本地缓存；GitLab/GitHub 短暂 EOF 时不会阻塞上游规则、DNS 和 GeoIP 查询，缓存每次 Bot 提交成功后原子更新。
 - 上游代理/直连规则可通过 Telegram 双向覆写为个人规则。
 - Telegram 私聊白名单默认只有 `538031590`。
 - 添加规则时智能选择精确域名、当前域名及下级或安全主域名；高级菜单支持关键词、通配符和正则，冲突时二次确认移动。

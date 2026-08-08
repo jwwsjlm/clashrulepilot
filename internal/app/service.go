@@ -3,7 +3,11 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -22,14 +26,20 @@ import (
 const personalPath = "data/personal_rules.json"
 
 type Service struct {
-	cfg      config.Config
-	repo     repository.Repository
-	upstream *syncer.Client
-	index    *ruleindex.Manager
-	lookup   *lookup.Inspector
-	mu       sync.Mutex
-	ready    bool
-	lastSync time.Time
+	cfg            config.Config
+	repo           repository.Repository
+	upstream       *syncer.Client
+	index          *ruleindex.Manager
+	lookup         *lookup.Inspector
+	mu             sync.Mutex
+	storeMu        sync.RWMutex
+	storeLoadMu    sync.Mutex
+	store          rules.Store
+	storeLoaded    bool
+	storeRetryAt   time.Time
+	storeLastError string
+	ready          bool
+	lastSync       time.Time
 }
 type ConflictError struct{ Existing rules.Rule }
 
@@ -46,10 +56,11 @@ type Result struct {
 }
 
 type QueryResult struct {
-	Domain   string
-	Personal []rules.Rule
-	Upstream []ruleindex.Match
-	Network  lookup.Report
+	Domain        string
+	Personal      []rules.Rule
+	PersonalError string
+	Upstream      []ruleindex.Match
+	Network       lookup.Report
 }
 
 func New(cfg config.Config) (*Service, error) {
@@ -94,16 +105,35 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.repo.EnsureRepo(ctx); err != nil {
+		if s.storeCacheExists() {
+			log.Printf("rule repository bootstrap unavailable; using local personal rules cache: %v", err)
+			s.ready = true
+			return nil
+		}
 		return err
 	}
 	if err := s.index.Load(); err != nil {
 		return fmt.Errorf("load upstream index: %w", err)
 	}
-	files, err := s.desiredFiles(ctx, nil, nil, nil)
+	store, err := s.LoadStore(ctx)
+	if err != nil {
+		// A transient GitLab/GitHub read failure must not prevent DNS, upstream
+		// index queries, or the Telegram bot from starting. Writes will retry
+		// after the repository becomes reachable again.
+		log.Printf("personal rules unavailable during bootstrap; continuing without remote personal rules: %v", err)
+		s.ready = true
+		return nil
+	}
+	files, err := s.desiredFiles(ctx, &store, nil, nil)
 	if err != nil {
 		return err
 	}
 	if _, err := s.commitChanged(ctx, files, "chore: initialize ClashRulePilot rules"); err != nil {
+		if s.storeCacheExists() {
+			log.Printf("rule repository bootstrap commit unavailable; using local personal rules cache: %v", err)
+			s.ready = true
+			return nil
+		}
 		return err
 	}
 	s.ready = true
@@ -111,11 +141,97 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 }
 
 func (s *Service) LoadStore(ctx context.Context) (rules.Store, error) {
+	s.storeLoadMu.Lock()
+	defer s.storeLoadMu.Unlock()
+	s.storeMu.RLock()
+	if s.storeLoaded {
+		store := cloneStore(s.store)
+		s.storeMu.RUnlock()
+		return store, nil
+	}
+	s.storeMu.RUnlock()
+	s.storeMu.RLock()
+	retryAt, lastError := s.storeRetryAt, s.storeLastError
+	s.storeMu.RUnlock()
+	if retryAt.After(time.Now()) {
+		return rules.Store{}, errors.New(lastError)
+	}
+
+	if data, err := os.ReadFile(s.storeCachePath()); err == nil {
+		store, decodeErr := rules.Decode(data)
+		if decodeErr == nil {
+			s.setStoreCache(store)
+			return cloneStore(store), nil
+		}
+		log.Printf("personal rules cache invalid: %v", decodeErr)
+	} else if !os.IsNotExist(err) {
+		log.Printf("personal rules cache read failed: %v", err)
+	}
+
 	b, _, err := s.repo.GetFile(ctx, personalPath)
 	if err != nil {
+		s.markStoreUnavailable(err)
 		return rules.Store{}, err
 	}
-	return rules.Decode(b)
+	store, err := rules.Decode(b)
+	if err != nil {
+		s.markStoreUnavailable(err)
+		return rules.Store{}, err
+	}
+	s.setStoreCache(store)
+	if cacheErr := s.persistStoreCache(store); cacheErr != nil {
+		log.Printf("personal rules cache write failed: %v", cacheErr)
+	}
+	return cloneStore(store), nil
+}
+
+func (s *Service) markStoreUnavailable(err error) {
+	s.storeMu.Lock()
+	defer s.storeMu.Unlock()
+	s.storeRetryAt = time.Now().Add(time.Minute)
+	s.storeLastError = err.Error()
+}
+
+func cloneStore(store rules.Store) rules.Store {
+	store.Rules = append([]rules.Rule(nil), store.Rules...)
+	return store
+}
+
+func (s *Service) setStoreCache(store rules.Store) {
+	s.storeMu.Lock()
+	defer s.storeMu.Unlock()
+	s.storeRetryAt = time.Time{}
+	s.storeLastError = ""
+	s.store = cloneStore(store)
+	s.storeLoaded = true
+}
+
+func (s *Service) persistStoreCache(store rules.Store) error {
+	encoded, err := rules.Encode(store)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.cfg.DataDir, 0o755); err != nil {
+		return err
+	}
+	tmp := s.storeCachePath() + ".tmp"
+	if err := os.WriteFile(tmp, encoded, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.storeCachePath()); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func (s *Service) storeCachePath() string {
+	return filepath.Join(s.cfg.DataDir, "personal_rules.cache.json")
+}
+
+func (s *Service) storeCacheExists() bool {
+	_, err := os.Stat(s.storeCachePath())
+	return err == nil
 }
 
 func (s *Service) AddRule(ctx context.Context, r rules.Rule, force bool) (Result, error) {
@@ -148,6 +264,10 @@ func (s *Service) AddRule(ctx context.Context, r rules.Rule, force bool) (Result
 	if err != nil {
 		return Result{}, err
 	}
+	s.setStoreCache(store)
+	if cacheErr := s.persistStoreCache(store); cacheErr != nil {
+		log.Printf("personal rules cache write failed after add: %v", cacheErr)
+	}
 	return Result{Commit: sha, Changed: 1, Store: store, Related: related}, nil
 }
 
@@ -173,6 +293,10 @@ func (s *Service) RemoveRule(ctx context.Context, domainName string, match *rule
 	sha, err := s.commitChanged(ctx, files, "feat: remove personal rule")
 	if err != nil {
 		return Result{}, err
+	}
+	s.setStoreCache(store)
+	if cacheErr := s.persistStoreCache(store); cacheErr != nil {
+		log.Printf("personal rules cache write failed after remove: %v", cacheErr)
 	}
 	return Result{Commit: sha, Changed: n, Store: store}, nil
 }
@@ -229,13 +353,14 @@ func (s *Service) Sync(ctx context.Context) (Result, error) {
 
 func (s *Service) Query(ctx context.Context, domainName string) (QueryResult, error) {
 	store, err := s.LoadStore(ctx)
-	if err != nil {
-		return QueryResult{}, err
-	}
 	result := QueryResult{Domain: domainName, Upstream: s.index.Query(domainName)}
-	for _, r := range rules.Ordered(store.Rules) {
-		if rules.Matches(r, domainName) {
-			result.Personal = append(result.Personal, r)
+	if err != nil {
+		result.PersonalError = err.Error()
+	} else {
+		for _, r := range rules.Ordered(store.Rules) {
+			if rules.Matches(r, domainName) {
+				result.Personal = append(result.Personal, r)
+			}
 		}
 	}
 	result.Network = s.lookup.Inspect(ctx, domainName)
