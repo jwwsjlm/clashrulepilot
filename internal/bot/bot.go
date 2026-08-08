@@ -335,11 +335,11 @@ func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pendin
 	if force {
 		verb = "正在移动规则并提交"
 	}
-	b.send(ctx, chatID, fmt.Sprintf("⏳ 已选择：%s\n准备提交：%s\n%s到%s，请稍候……", matchText(p.Match), rules.Token(toRule(p, userID)), verb, repoProviderText(b.cfg.RuleRepoProvider)), nil)
+	progress := b.sendProgress(ctx, chatID, fmt.Sprintf("⏳ 已选择：%s\n准备提交：%s\n%s到%s，请稍候……", matchText(p.Match), rules.Token(toRule(p, userID)), verb, repoProviderText(b.cfg.RuleRepoProvider)))
 	result, err := b.service.AddRule(ctx, toRule(p, userID), force)
 	if conflict, ok := err.(*app.ConflictError); ok {
 		b.setBusy(chatID, false)
-		b.send(ctx, chatID, fmt.Sprintf("⚠️ 更改域名分组确认（第 2 步）\n\n规则：%s\n当前分组：%s\n目标分组：%s\n\n确认后会移动现有规则并生成新的 Git commit。OpenClash 下次更新远程覆写后将使用新分组。", rules.Token(conflict.Existing), actionText(conflict.Existing.Action), actionText(p.Action)), keyboard([][]button{
+		b.sendTarget(ctx, chatID, progress, fmt.Sprintf("⚠️ 更改域名分组确认（第 2 步）\n\n规则：%s\n当前分组：%s\n目标分组：%s\n\n确认后会移动现有规则并生成新的 Git commit。OpenClash 下次更新远程覆写后将使用新分组。", rules.Token(conflict.Existing), actionText(conflict.Existing.Action), actionText(p.Action)), keyboard([][]button{
 			{{Text: "🔄 确认更改分组", Data: "confirm:yes"}, {Text: "✖️ 取消并返回主菜单", Data: "nav:cancel"}},
 		}))
 		return
@@ -350,14 +350,14 @@ func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pendin
 		if strings.Contains(message, "rule already exists") {
 			message = "该规则已经存在，无需重复提交"
 		}
-		b.send(ctx, chatID, "提交失败："+message, homeMenu())
+		b.sendTarget(ctx, chatID, progress, "提交失败："+message, homeMenu())
 		return
 	}
 	var extra string
 	if len(result.Related) > 0 {
 		extra = fmt.Sprintf("\n\n⚠️ 已保留 %d 条相反动作的父子/重叠规则。生成的显式规则会按精确度排序，更具体的规则优先。", len(result.Related))
 	}
-	b.send(ctx, chatID, fmt.Sprintf("✅ 规则已提交\n\n动作：%s\n规则：%s\n覆盖：%s\ncommit：%s%s", actionText(p.Action), rules.Token(toRule(p, userID)), coverageText(p), short(result.Commit), extra), homeMenu())
+	b.sendTarget(ctx, chatID, progress, fmt.Sprintf("✅ 规则已提交\n\n动作：%s\n规则：%s\n覆盖：%s\ncommit：%s%s", actionText(p.Action), rules.Token(toRule(p, userID)), coverageText(p), short(result.Commit), extra), homeMenu())
 }
 
 func (b *Bot) startAddMode(ctx context.Context, chatID int64, action rules.Action) {
@@ -693,14 +693,14 @@ func (b *Bot) confirmRemoval(ctx context.Context, chatID int64, p *pending) {
 		}))
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("⏳ 已确认删除 %d 条规则，正在提交到%s，请稍候……", len(current), repoProviderText(b.cfg.RuleRepoProvider)), nil)
+	progress := b.sendProgress(ctx, chatID, fmt.Sprintf("⏳ 已确认删除 %d 条规则，正在提交到%s，请稍候……", len(current), repoProviderText(b.cfg.RuleRepoProvider)))
 	result, err := b.service.RemoveRule(ctx, p.Domain, nil)
 	b.clear(chatID)
 	if err != nil {
-		b.send(ctx, chatID, "删除失败："+err.Error(), homeMenu())
+		b.sendTarget(ctx, chatID, progress, "删除失败："+err.Error(), homeMenu())
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("✅ 删除完成\n域名：%s\n删除规则：%d 条\ncommit：%s", p.Domain, result.Changed, short(result.Commit)), homeMenu())
+	b.sendTarget(ctx, chatID, progress, fmt.Sprintf("✅ 删除完成\n域名：%s\n删除规则：%d 条\ncommit：%s", p.Domain, result.Changed, short(result.Commit)), homeMenu())
 }
 
 func rulesForDomain(store rules.Store, domainName string) []rules.Rule {
@@ -1197,6 +1197,20 @@ func (b *Bot) send(ctx context.Context, chatID int64, text string, kb models.Rep
 
 func (b *Bot) sendWithEntities(ctx context.Context, chatID int64, text string, kb models.ReplyMarkup, entities []models.MessageEntity) {
 	b.sendTargetModeEntities(ctx, chatID, nil, text, kb, entities, true)
+}
+
+func (b *Bot) sendProgress(ctx context.Context, chatID int64, text string) *models.Message {
+	msg, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text})
+	if err != nil {
+		log.Printf("telegram progress send: %v", err)
+		return nil
+	}
+	if msg == nil {
+		log.Printf("telegram progress send returned no message chat=%d", chatID)
+		return nil
+	}
+	log.Printf("telegram progress message sent chat=%d message=%d", chatID, msg.ID)
+	return msg
 }
 
 func (b *Bot) sendTarget(ctx context.Context, chatID int64, target *models.Message, text string, kb models.ReplyMarkup) {
