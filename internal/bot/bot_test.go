@@ -365,6 +365,28 @@ func TestSmartSuggestionDoesNotRepeatExistingProxyRule(t *testing.T) {
 	}
 }
 
+func TestProxySuggestionButtonIsMarkedRecommended(t *testing.T) {
+	decision := smartSuggestion(nil, lookup.Report{
+		ChinaChecked: 1,
+		GeoIPs:       []lookup.GeoIPInfo{{IP: "8.8.8.8", CountryCode: "US"}},
+	})
+	if decision.ButtonAction != rules.Proxy || decision.ButtonText != "🔴 建议添加代理 · ⭐ 推荐" {
+		t.Fatalf("proxy recommendation is not clearly marked: %+v", decision)
+	}
+}
+
+func TestQueryUsesActivePromptMessageAsEditTarget(t *testing.T) {
+	p := &pending{Mode: "query", ActiveMessageID: 1234}
+	target := queryMessageTarget(p, nil)
+	if target == nil || target.ID != 1234 {
+		t.Fatalf("query should edit the active prompt message: %#v", target)
+	}
+	existing := &models.Message{ID: 5678}
+	if got := queryMessageTarget(p, existing); got != existing {
+		t.Fatalf("explicit callback message target must be preserved: %#v", got)
+	}
+}
+
 func TestSmartSuggestionKeepsMatchingPersonalRuleWithoutButton(t *testing.T) {
 	decision := smartSuggestion([]rules.Rule{{Domain: "example.com", Match: rules.Exact, Action: rules.Direct}}, lookup.Report{
 		ChinaChecked: 1,

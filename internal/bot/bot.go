@@ -230,10 +230,18 @@ func (b *Bot) acceptDomainTarget(ctx context.Context, chatID int64, p *pending, 
 		p.RootDomain = domain.RuleRoot(domainName)
 		b.showMatchMenuTarget(ctx, chatID, p, target)
 	case "query":
-		b.query(ctx, chatID, domainName)
+		target = queryMessageTarget(p, target)
+		b.queryTarget(ctx, chatID, domainName, target)
 	case "remove":
 		b.removeDomain(ctx, chatID, domainName)
 	}
+}
+
+func queryMessageTarget(p *pending, target *models.Message) *models.Message {
+	if target != nil || p == nil || p.ActiveMessageID <= 0 {
+		return target
+	}
+	return &models.Message{ID: p.ActiveMessageID}
 }
 
 func (b *Bot) showMatchMenu(ctx context.Context, chatID int64, p *pending) {
@@ -738,9 +746,16 @@ func removalConfirmationText(domainName string, matched []rules.Rule) string {
 }
 
 func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
+	b.queryTarget(ctx, chatID, domainName, nil)
+}
+
+func (b *Bot) queryTarget(ctx context.Context, chatID int64, domainName string, target *models.Message) {
+	if target != nil {
+		b.sendTargetModeEntities(ctx, chatID, target, "⏳ 正在查询："+domainName+"\n正在检查个人规则、上游规则、DNS 与 IP 归属，请稍候……", nil, nil, false)
+	}
 	result, err := b.service.Query(ctx, domainName)
 	if err != nil {
-		b.send(ctx, chatID, "查询失败："+err.Error(), errorMenu())
+		b.sendTargetModeEntities(ctx, chatID, target, "查询失败："+err.Error(), errorMenu(), nil, target == nil)
 		return
 	}
 	personal := "未找到"
@@ -849,7 +864,7 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 		rows = append(rows, []button{{Text: "🗑️ 删除匹配的个人规则", Data: "query:remove"}})
 	}
 	b.setQuerySession(chatID, domainName, &result)
-	b.sendWithEntities(ctx, chatID, text, keyboard(rows), entities)
+	b.sendTargetModeEntities(ctx, chatID, target, text, keyboard(rows), entities, target == nil)
 }
 
 func whoisEntities(text, domainName, registrable string) []models.MessageEntity {
@@ -1193,10 +1208,6 @@ func cancelMenu() *models.InlineKeyboardMarkup {
 }
 func (b *Bot) send(ctx context.Context, chatID int64, text string, kb models.ReplyMarkup) {
 	b.sendTarget(ctx, chatID, nil, text, kb)
-}
-
-func (b *Bot) sendWithEntities(ctx context.Context, chatID int64, text string, kb models.ReplyMarkup, entities []models.MessageEntity) {
-	b.sendTargetModeEntities(ctx, chatID, nil, text, kb, entities, true)
 }
 
 func (b *Bot) sendProgress(ctx context.Context, chatID int64, text string) *models.Message {
@@ -1633,10 +1644,10 @@ func smartSuggestion(personal []rules.Rule, report lookup.Report) suggestionDeci
 	if len(personal) == 0 {
 		if geoKind == "direct" {
 			decision.ButtonAction = rules.Direct
-			decision.ButtonText = "🟢 建议添加直连"
+			decision.ButtonText = "🟢 建议添加直连 · ⭐ 推荐"
 		} else if geoKind == "proxy" {
 			decision.ButtonAction = rules.Proxy
-			decision.ButtonText = "🔴 建议添加代理"
+			decision.ButtonText = "🔴 建议添加代理 · ⭐ 推荐"
 		}
 		return decision
 	}
@@ -1663,7 +1674,7 @@ func smartSuggestion(personal []rules.Rule, report lookup.Report) suggestionDeci
 		} else {
 			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆，当前个人规则为%s，与当前地域判断相反。若访问确实需要直连，可切换为%s；CDN 位置可能变化，请结合实际访问确认。%s", current, actionText(rules.Direct), matchNote)
 			decision.ButtonAction = rules.Direct
-			decision.ButtonText = "🟢 切换为直连（建议）"
+			decision.ButtonText = "🟢 切换为直连 · ⭐ 推荐"
 		}
 	case "proxy":
 		if effective.Action == rules.Proxy {
@@ -1673,7 +1684,7 @@ func smartSuggestion(personal []rules.Rule, report lookup.Report) suggestionDeci
 		} else {
 			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆以外，通常适合%s；当前个人规则为%s。若访问确实需要代理，可切换为%s。CDN 位置可能变化，请结合实际访问确认。%s", actionText(rules.Proxy), current, actionText(rules.Proxy), matchNote)
 			decision.ButtonAction = rules.Proxy
-			decision.ButtonText = "🔴 切换为代理（建议）"
+			decision.ButtonText = "🔴 切换为代理 · ⭐ 推荐"
 		}
 	case "both":
 		decision.Text = fmt.Sprintf("💡 建议：当前域名同时解析到中国大陆和境外地址，可能存在 CDN 分流；当前个人规则为%s，建议先保持现有规则，不根据单次解析自动改分组。必要时可切换为%s。%s", current, oppositeText, matchNote)
