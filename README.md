@@ -23,6 +23,8 @@
 
 容器启动时只使用 root 对 `DATA_DIR` 自动修正所有权，随后立即降权为 UID/GID `65532` 再启动 GitHub、Telegram、定时同步和健康检查。默认 `./data:/app/data` 不需要手动执行 `chmod` 或 `chown`，也不会修改父目录、`.env` 或 Compose 文件。
 
+新版默认 `DATA_DIR=/app/data`。为兼容旧部署，如果仍配置为 `/data` 且根文件系统只读，程序会自动切换到 `/app/data`；仍建议在 `.env` 中更新为新路径，避免产生兼容提示。
+
 Token 只通过环境变量注入，不要提交到仓库。曾经在聊天、截图或日志中公开过的 Token 必须撤销后重新生成。
 
 GitHub 示例：

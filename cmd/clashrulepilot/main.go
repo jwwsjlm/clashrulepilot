@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -22,6 +23,17 @@ func main() {
 		log.Fatal(err)
 	}
 	runtimeInfo, err := runtimeuser.Prepare(cfg.DataDir)
+	if err != nil && cfg.DataDir == "/data" {
+		legacyErr := err
+		const fallbackDataDir = "/app/data"
+		runtimeInfo, err = runtimeuser.Prepare(fallbackDataDir)
+		if err == nil {
+			log.Printf("legacy DATA_DIR=/data unavailable (%v); automatically using %s", legacyErr, fallbackDataDir)
+			cfg.DataDir = fallbackDataDir
+		} else {
+			err = fmt.Errorf("legacy /data failed: %v; fallback %s failed: %w", legacyErr, fallbackDataDir, err)
+		}
+	}
 	if err != nil {
 		log.Fatalf("prepare data directory %s: %v", cfg.DataDir, err)
 	}
