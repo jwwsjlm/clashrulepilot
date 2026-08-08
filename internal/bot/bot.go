@@ -495,6 +495,18 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		pendingRule.Match = ""
 		pendingRule.OriginalDomain = pendingRule.Domain
 		pendingRule.RootDomain = domain.RuleRoot(pendingRule.Domain)
+	case "suggest:direct":
+		pendingRule.Mode = "add"
+		pendingRule.Action = rules.Direct
+		pendingRule.Match = ""
+		pendingRule.OriginalDomain = pendingRule.Domain
+		pendingRule.RootDomain = domain.RuleRoot(pendingRule.Domain)
+	case "suggest:proxy":
+		pendingRule.Mode = "add"
+		pendingRule.Action = rules.Proxy
+		pendingRule.Match = ""
+		pendingRule.OriginalDomain = pendingRule.Domain
+		pendingRule.RootDomain = domain.RuleRoot(pendingRule.Domain)
 	case "confirm:yes":
 		b.commitPending(ctx, chatID, query.From.ID, pendingRule, true)
 		return
@@ -601,11 +613,19 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 		chinaSignal = "无法判断（没有取得真实公网 IP）"
 	}
 	dnsText := formatDNSReport(result.Network)
+	geoText := formatGeoIPReport(result.Network)
+	suggestion, suggestedAction := geoSuggestion(result.Network)
 	root := result.Network.Registrable
 	if root == "" {
 		root = "未识别"
 	}
 	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n🧱 GEOSITE:GFW：%s\n\n🌐 DNS 解析：%s\n可注册域名：%s\n\n📡 中国大陆信号：%s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), dnsText, root, chinaSignal)
+	if geoText != "" {
+		text += "\n\n" + geoText
+	}
+	if suggestion != "" {
+		text += "\n\n" + suggestion
+	}
 	rows := [][]button{}
 	if hasProxy {
 		rows = append(rows, []button{{Text: "🎯 覆写为个人直连", Data: "override:direct"}})
@@ -618,6 +638,18 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 		b.mu.Lock()
 		b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
 		b.mu.Unlock()
+	}
+	if suggestedAction != "" {
+		label := "💡 建议添加代理"
+		if suggestedAction == rules.Direct {
+			label = "💡 建议添加直连"
+		}
+		rows = append(rows, []button{{Text: label, Data: "suggest:" + string(suggestedAction)}})
+		if !hasDirect && !hasProxy {
+			b.mu.Lock()
+			b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
+			b.mu.Unlock()
+		}
 	}
 	b.send(ctx, chatID, text, keyboard(rows))
 }
@@ -920,4 +952,91 @@ func formatDNSReport(report lookup.Report) string {
 		fmt.Fprintf(&out, "\nDoH：失败（%s）", report.DoHError)
 	}
 	return out.String()
+}
+
+func formatGeoIPReport(report lookup.Report) string {
+	if len(report.GeoIPs) == 0 {
+		return "📍 IP 地域解析：未取得"
+	}
+	var out strings.Builder
+	out.WriteString("📍 IP 地域解析：")
+	shown := 0
+	for _, info := range report.GeoIPs {
+		if shown >= 8 {
+			break
+		}
+		shown++
+		out.WriteString("\n  ")
+		if info.Error != "" {
+			fmt.Fprintf(&out, "%s → 检测失败（%s）", info.IP, info.Error)
+			continue
+		}
+		place := geoPlace(info)
+		if info.China {
+			place = "🇨🇳 " + place
+		} else {
+			place = "🌐 " + place
+		}
+		fmt.Fprintf(&out, "%s → %s", info.IP, place)
+	}
+	if len(report.GeoIPs) > shown {
+		fmt.Fprintf(&out, "\n  … 其余 %d 个地址未显示", len(report.GeoIPs)-shown)
+	}
+	return out.String()
+}
+
+func geoPlace(info lookup.GeoIPInfo) string {
+	parts := make([]string, 0, 5)
+	if info.Country != "" {
+		parts = append(parts, info.Country)
+	} else if info.CountryCode != "" {
+		parts = append(parts, info.CountryCode)
+	}
+	if info.Region != "" {
+		parts = append(parts, info.Region)
+	}
+	if info.City != "" {
+		parts = append(parts, info.City)
+	}
+	if info.ISP != "" {
+		parts = append(parts, "ISP "+info.ISP)
+	} else if info.Org != "" {
+		parts = append(parts, "组织 "+info.Org)
+	}
+	if info.ASN != "" {
+		asn := info.ASN
+		if !strings.HasPrefix(strings.ToUpper(asn), "AS") {
+			asn = "AS" + asn
+		}
+		parts = append(parts, asn)
+	}
+	if len(parts) == 0 {
+		return "未知地域"
+	}
+	return strings.Join(parts, " · ")
+}
+
+func geoSuggestion(report lookup.Report) (string, rules.Action) {
+	if len(report.GeoIPs) == 0 || report.ChinaChecked == 0 {
+		return "💡 建议：暂时无法根据 IP 地域判断直连或代理。", ""
+	}
+	china, foreign := 0, 0
+	for _, info := range report.GeoIPs {
+		if info.Error != "" {
+			continue
+		}
+		if info.China {
+			china++
+		} else {
+			foreign++
+		}
+	}
+	switch {
+	case foreign > 0 && china == 0:
+		return "💡 建议：真实 IP 均在中国大陆以外，通常建议添加到「代理」规则。CDN 位置可能变化，请结合实际访问情况确认。", rules.Proxy
+	case china > 0 && foreign == 0:
+		return "💡 建议：中国大陆真实 IP，通常建议添加到「直连」规则。若服务仍不可达，再改为代理。", rules.Direct
+	default:
+		return "💡 建议：该域名同时解析到中国大陆和境外地址，地域会随 CDN 变化，建议优先使用「代理」规则。", rules.Proxy
+	}
 }

@@ -36,6 +36,24 @@ type Report struct {
 	DoHProvider       string
 	DoHError          string
 	DoHCacheHit       bool
+	GeoIPs            []GeoIPInfo
+}
+
+// GeoIPInfo is the per-address result returned by the configured GeoIP API.
+// Keeping the address alongside the response prevents the UI from showing an
+// unexplained aggregate China=true/false result when a hostname has multiple
+// CDN addresses in different regions.
+type GeoIPInfo struct {
+	IP          string
+	Country     string
+	CountryCode string
+	Region      string
+	City        string
+	ISP         string
+	Org         string
+	ASN         string
+	China       bool
+	Error       string
 }
 
 type Status struct {
@@ -46,7 +64,7 @@ type Status struct {
 }
 
 type geoCacheEntry struct {
-	china   bool
+	info    GeoIPInfo
 	expires time.Time
 }
 
@@ -195,26 +213,37 @@ func (i *Inspector) inspectGeoIP(ctx context.Context, r *Report) {
 		return
 	}
 	type result struct {
-		china bool
+		index int
+		info  GeoIPInfo
 		err   error
 	}
 	ch := make(chan result, len(ips))
-	for _, ip := range ips {
-		go func(ip string) {
-			china, err := i.isChina(ctx, ip)
-			ch <- result{china: china, err: err}
-		}(ip)
+	for index, ip := range ips {
+		go func(index int, ip string) {
+			info, err := i.lookupGeo(ctx, ip)
+			ch <- result{index: index, info: info, err: err}
+		}(index, ip)
 	}
 	var errors []string
+	results := make([]GeoIPInfo, len(ips))
 	for range ips {
 		one := <-ch
+		if one.err != nil {
+			one.info.Error = compact(one.err.Error())
+		}
+		results[one.index] = one.info
 		if one.err != nil {
 			errors = append(errors, one.err.Error())
 			continue
 		}
 		r.ChinaChecked++
-		if one.china {
+		if one.info.China {
 			r.China = true
+		}
+	}
+	for _, info := range results {
+		if info.IP != "" {
+			r.GeoIPs = append(r.GeoIPs, info)
 		}
 	}
 	if len(errors) > 0 && r.ChinaChecked == 0 {
@@ -368,13 +397,19 @@ func isFakeIP(value string) bool {
 }
 
 func (i *Inspector) isChina(ctx context.Context, ip string) (bool, error) {
+	info, err := i.lookupGeo(ctx, ip)
+	return info.China, err
+}
+
+func (i *Inspector) lookupGeo(ctx context.Context, ip string) (GeoIPInfo, error) {
 	now := time.Now()
 	i.mu.Lock()
 	if cached, ok := i.geoCache[ip]; ok && now.Before(cached.expires) {
 		i.mu.Unlock()
-		return cached.china, nil
+		return cached.info, nil
 	}
 	i.mu.Unlock()
+	info := GeoIPInfo{IP: ip}
 	endpoint := strings.ReplaceAll(i.apiURL, "{ip}", url.PathEscape(ip))
 	var data map[string]any
 	resp, err := i.http.R().
@@ -383,23 +418,35 @@ func (i *Inspector) isChina(ctx context.Context, ip string) (bool, error) {
 		SetSuccessResult(&data).
 		Get(endpoint)
 	if err != nil {
-		return false, err
+		return info, err
 	}
 	if !resp.IsSuccessState() {
-		return false, fmt.Errorf("GeoIP HTTP %d: %s", resp.StatusCode, strings.TrimSpace(resp.String()))
+		return info, fmt.Errorf("GeoIP HTTP %d: %s", resp.StatusCode, strings.TrimSpace(resp.String()))
 	}
 	if success, ok := data["success"].(bool); ok && !success {
-		return false, fmt.Errorf("GeoIP lookup rejected")
+		return info, fmt.Errorf("GeoIP lookup rejected")
 	}
 	code := firstString(data, "country_code", "countryCode", "country_code2")
 	if code == "" {
-		return false, fmt.Errorf("GeoIP response has no country code")
+		return info, fmt.Errorf("GeoIP response has no country code")
 	}
-	china := strings.EqualFold(code, "CN")
+	info.CountryCode = strings.ToUpper(code)
+	info.Country = firstString(data, "country")
+	info.Region = firstString(data, "region", "region_name")
+	info.City = firstString(data, "city")
+	if connection, ok := data["connection"].(map[string]any); ok {
+		info.ISP = firstString(connection, "isp")
+		info.Org = firstString(connection, "org", "organization")
+		info.ASN = firstString(connection, "asn")
+	}
+	if info.ASN == "" {
+		info.ASN = firstString(data, "asn")
+	}
+	info.China = strings.EqualFold(info.CountryCode, "CN")
 	i.mu.Lock()
-	i.geoCache[ip] = geoCacheEntry{china: china, expires: now.Add(24 * time.Hour)}
+	i.geoCache[ip] = geoCacheEntry{info: info, expires: now.Add(24 * time.Hour)}
 	i.mu.Unlock()
-	return china, nil
+	return info, nil
 }
 
 func (i *Inspector) Status() Status {
@@ -458,9 +505,29 @@ func compact(value string) string {
 
 func firstString(m map[string]any, keys ...string) string {
 	for _, key := range keys {
-		if v, ok := m[key].(string); ok && v != "" {
-			return v
+		if value := valueString(m[key]); value != "" {
+			return value
 		}
 	}
 	return ""
+}
+
+func valueString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		if v == float64(int64(v)) {
+			return fmt.Sprintf("%d", int64(v))
+		}
+		return fmt.Sprintf("%g", v)
+	case float32:
+		return fmt.Sprintf("%g", v)
+	case int:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	default:
+		return ""
+	}
 }

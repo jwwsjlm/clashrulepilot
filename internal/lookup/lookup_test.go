@@ -43,6 +43,26 @@ func TestIsChinaWithReq(t *testing.T) {
 	}
 }
 
+func TestLookupGeoKeepsLocationAndNetworkDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"country":"Singapore","country_code":"SG","region":"Central Singapore","city":"Singapore","connection":{"isp":"Example ISP","org":"Example Org","asn":13335}}`))
+	}))
+	defer server.Close()
+
+	inspector := New(server.URL+"/{ip}", DoHConfig{})
+	info, err := inspector.lookupGeo(context.Background(), "84.17.37.214")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IP != "84.17.37.214" || info.Country != "Singapore" || info.CountryCode != "SG" || info.City != "Singapore" {
+		t.Fatalf("location fields missing: %+v", info)
+	}
+	if info.ISP != "Example ISP" || info.Org != "Example Org" || info.ASN != "13335" || info.China {
+		t.Fatalf("network fields missing: %+v", info)
+	}
+}
+
 func TestIsFakeIP(t *testing.T) {
 	cases := map[string]bool{
 		"198.18.0.96":          true,
