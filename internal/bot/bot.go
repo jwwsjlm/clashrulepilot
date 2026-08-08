@@ -740,10 +740,10 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 		rows = append(rows, []button{{Text: "🌍 查看国外 DNS 详情", Data: "dns:details:foreign"}})
 	}
 	if suggestionKind == "direct" || suggestionKind == "both" {
-		rows = append(rows, []button{{Text: "💡 建议添加直连", Data: "suggest:direct"}})
+		rows = append(rows, []button{{Text: "🟢 建议添加直连", Data: "suggest:direct"}})
 	}
 	if suggestionKind == "proxy" || suggestionKind == "both" {
-		rows = append(rows, []button{{Text: "🚀 建议添加代理", Data: "suggest:proxy"}})
+		rows = append(rows, []button{{Text: "🔴 建议添加代理", Data: "suggest:proxy"}})
 	}
 	if len(result.Network.GeoIPs) > 0 || len(result.Network.Domestic.A)+len(result.Network.Domestic.AAAA)+len(result.Network.Foreign.A)+len(result.Network.Foreign.AAAA) > 0 {
 		b.mu.Lock()
@@ -1236,10 +1236,10 @@ func geoSuggestion(report lookup.Report) (string, string) {
 	}
 	switch {
 	case foreign > 0 && china == 0:
-		return "💡 建议：真实 IP 均在中国大陆以外，通常建议添加到「代理」规则。CDN 位置可能变化，请结合实际访问情况确认。", "proxy"
+		return "💡 建议：真实 IP 均在中国大陆以外，通常建议添加到「🔴 代理」规则。CDN 位置可能变化，请结合实际访问情况确认。", "proxy"
 	case china > 0 && foreign == 0:
-		return "💡 建议：中国大陆真实 IP，通常建议添加到「直连」规则。若服务仍不可达，再改为代理。", "direct"
+		return "💡 建议：中国大陆真实 IP，通常建议添加到「🟢 直连」规则。若服务仍不可达，再改为「🔴 代理」。", "direct"
 	default:
-		return "💡 建议：该域名同时解析到中国大陆和境外地址，地域会随 CDN 变化，请人工选择直连或代理。", "both"
+		return "💡 建议：该域名同时解析到中国大陆和境外地址，地域会随 CDN 变化，请人工选择「🟢 直连」或「🔴 代理」。", "both"
 	}
 }

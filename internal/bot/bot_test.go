@@ -181,3 +181,14 @@ func TestDNSReportUsesCompactLineSpacing(t *testing.T) {
 		t.Fatalf("DNS summary contains extra blank lines: %q", text)
 	}
 }
+
+func TestGeoSuggestionColorsOnlyRoutingKeywords(t *testing.T) {
+	proxyText, proxyKind := geoSuggestion(lookup.Report{ChinaChecked: 1, GeoIPs: []lookup.GeoIPInfo{{IP: "8.8.8.8", CountryCode: "US"}}})
+	if proxyKind != "proxy" || !strings.Contains(proxyText, "🔴 代理") || strings.Contains(proxyText, "🟢") {
+		t.Fatalf("unexpected proxy suggestion: %q kind=%q", proxyText, proxyKind)
+	}
+	directText, directKind := geoSuggestion(lookup.Report{ChinaChecked: 1, China: true, GeoIPs: []lookup.GeoIPInfo{{IP: "1.2.3.4", CountryCode: "CN", China: true}}})
+	if directKind != "direct" || !strings.Contains(directText, "🟢 直连") {
+		t.Fatalf("unexpected direct suggestion: %q kind=%q", directText, directKind)
+	}
+}
