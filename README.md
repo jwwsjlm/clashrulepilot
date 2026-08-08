@@ -76,6 +76,12 @@ UPSTREAM_INDEX_ENABLED=true
 SYNC_CRON=0 3 * * *
 DATA_DIR=/app/data
 GEOIP_API_URL=https://ipwho.is/{ip}
+DNS_DOMESTIC_ENABLED=true
+DNS_DOMESTIC_URLS=https://dns.alidns.com/resolve,https://doh.pub/dns-query
+DNS_FOREIGN_ENABLED=true
+DNS_FOREIGN_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve
+DNS_TIMEOUT=4s
+DNS_CACHE_SIZE=2048
 DOH_ENABLED=true
 DOH_API_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve
 DOH_TIMEOUT=4s
@@ -84,7 +90,7 @@ DOH_CACHE_SIZE=2048
 
 `SYNC_UPSTREAM=false` 只表示不向个人公开仓库镜像 Aethersailor 文件；本地查询索引仍会按 `SYNC_CRON` 更新。每轮同步都以远端当前文件清单完整重建索引，远端已删除或改名的文件会从新索引消失。原始域名规则、`GEOSITE_CN.yaml` 和 `GEOSITE_GFW.yaml` 落地到宿主机 `./data/upstream/`，查询索引保存为 `./data/upstream-index.db`。查询通过 bbolt 按需读取磁盘，不再把完整规则树常驻 Go 堆内存；同步失败时继续使用上一次完整成功数据库。
 
-如果 OpenClash/Mihomo 使用 `fake-ip` DNS 模式，容器查询可能得到 `198.18.0.0/15` 或 `fdfe:dcba:9876::/64` 中的合成地址。程序会保留本地 Fake-IP 诊断信息，并依次请求 Cloudflare、Google DoH 获取真实 A/AAAA，再将真实地址交给 GeoIP。DoH 仅在本地没有真实地址时触发，结果按 DNS TTL 缓存。
+国内/国外 DNS 查询只用于 Bot 查询、地域判断和规则建议，不会修改 OpenClash/Mihomo 正在使用的 DNS 配置。如果 OpenClash/Mihomo 使用 `fake-ip` DNS 模式，容器查询可能得到 `198.18.0.0/15` 或 `fdfe:dcba:9876::/64` 中的合成地址。程序会并发查询国内组（阿里云 `/resolve`、腾讯 DNSPod）和国外组（Cloudflare、Google），每组主端点失败后切备用端点，再将去重后的真实地址交给 GeoIP。结果按 DNS TTL 缓存，Telegram 查询消息提供国内/国外摘要和逐 IP 详情按钮。旧 `DOH_*` 变量仍兼容；未设置 `DNS_FOREIGN_URLS` 时使用 `DOH_API_URLS`。
 
 ## 域名匹配方式
 

@@ -19,20 +19,26 @@ type Config struct {
 	GitLabToken      string
 	GitLabBaseURL    string
 
-	UpstreamRepo     string
-	UpstreamBranch   string
-	ProxyPolicyGroup string
-	SyncCron         string
-	HealthAddr       string
-	DataDir          string
-	GeoIPAPIURL      string
-	DoHEnabled       bool
-	DoHAPIURLs       []string
-	DoHTimeout       time.Duration
-	DoHCacheSize     int
-	SyncUpstream     bool
-	UpstreamIndex    bool
-	Location         *time.Location
+	UpstreamRepo       string
+	UpstreamBranch     string
+	ProxyPolicyGroup   string
+	SyncCron           string
+	HealthAddr         string
+	DataDir            string
+	GeoIPAPIURL        string
+	DoHEnabled         bool
+	DoHAPIURLs         []string
+	DoHTimeout         time.Duration
+	DoHCacheSize       int
+	DomesticDNSEnabled bool
+	DomesticDNSURLs    []string
+	ForeignDNSEnabled  bool
+	ForeignDNSURLs     []string
+	DNSTimeout         time.Duration
+	DNSCacheSize       int
+	SyncUpstream       bool
+	UpstreamIndex      bool
+	Location           *time.Location
 }
 
 func Load() (Config, error) {
@@ -58,22 +64,28 @@ func Load() (Config, error) {
 	}
 	legacyRepo := getenv("GITHUB_RULE_REPO_NAME", "clash-rule-pilot-rules")
 	legacyBranch := getenv("GITHUB_BRANCH", "main")
-	dohTimeout, err := time.ParseDuration(getenv("DOH_TIMEOUT", "4s"))
-	if err != nil || dohTimeout <= 0 {
-		return Config{}, fmt.Errorf("invalid DOH_TIMEOUT %q", os.Getenv("DOH_TIMEOUT"))
+	dnsTimeout, err := time.ParseDuration(getenv("DNS_TIMEOUT", getenv("DOH_TIMEOUT", "4s")))
+	if err != nil || dnsTimeout <= 0 {
+		return Config{}, fmt.Errorf("invalid DNS_TIMEOUT %q", os.Getenv("DNS_TIMEOUT"))
 	}
-	dohCacheSize, err := strconv.Atoi(getenv("DOH_CACHE_SIZE", "2048"))
-	if err != nil || dohCacheSize <= 0 {
-		return Config{}, fmt.Errorf("DOH_CACHE_SIZE must be a positive integer")
+	dnsCacheSize, err := strconv.Atoi(getenv("DNS_CACHE_SIZE", getenv("DOH_CACHE_SIZE", "2048")))
+	if err != nil || dnsCacheSize <= 0 {
+		return Config{}, fmt.Errorf("DNS_CACHE_SIZE must be a positive integer")
 	}
-	var dohURLs []string
-	for _, raw := range strings.Split(getenv("DOH_API_URLS", "https://cloudflare-dns.com/dns-query,https://dns.google/resolve"), ",") {
-		if value := strings.TrimSpace(raw); value != "" {
-			dohURLs = append(dohURLs, value)
-		}
+	legacyEnabled := getenvBool("DOH_ENABLED", true)
+	legacyURLs := splitURLs(getenv("DOH_API_URLS", "https://cloudflare-dns.com/dns-query,https://dns.google/resolve"))
+	domesticURLs := splitURLs(getenv("DNS_DOMESTIC_URLS", "https://dns.alidns.com/resolve,https://doh.pub/dns-query"))
+	foreignURLs := legacyURLs
+	if strings.TrimSpace(os.Getenv("DNS_FOREIGN_URLS")) != "" {
+		foreignURLs = splitURLs(os.Getenv("DNS_FOREIGN_URLS"))
 	}
-	if getenvBool("DOH_ENABLED", true) && len(dohURLs) == 0 {
-		return Config{}, fmt.Errorf("DOH_API_URLS must contain at least one endpoint when DOH_ENABLED=true")
+	domesticEnabled := getenvBool("DNS_DOMESTIC_ENABLED", legacyEnabled)
+	foreignEnabled := getenvBool("DNS_FOREIGN_ENABLED", legacyEnabled)
+	if domesticEnabled && len(domesticURLs) == 0 {
+		return Config{}, fmt.Errorf("DNS_DOMESTIC_URLS must contain at least one endpoint when DNS_DOMESTIC_ENABLED=true")
+	}
+	if foreignEnabled && len(foreignURLs) == 0 {
+		return Config{}, fmt.Errorf("DNS_FOREIGN_URLS must contain at least one endpoint when DNS_FOREIGN_ENABLED=true")
 	}
 	return Config{
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"), Allowlist: allow,
@@ -81,9 +93,21 @@ func Load() (Config, error) {
 		GitHubToken: os.Getenv("GITHUB_TOKEN"), GitLabToken: os.Getenv("GITLAB_TOKEN"), GitLabBaseURL: strings.TrimRight(getenv("GITLAB_BASE_URL", "https://gitlab.com"), "/"),
 		UpstreamRepo: getenv("UPSTREAM_REPO", "Aethersailor/Custom_OpenClash_Rules"), UpstreamBranch: getenv("UPSTREAM_BRANCH", "main"), ProxyPolicyGroup: getenv("PROXY_POLICY_GROUP", "🚀 手动选择"),
 		SyncCron: getenv("SYNC_CRON", "0 3 * * *"), HealthAddr: getenv("HEALTH_ADDR", ":8080"), DataDir: getenv("DATA_DIR", "/app/data"), GeoIPAPIURL: getenv("GEOIP_API_URL", "https://ipwho.is/{ip}"),
-		DoHEnabled: getenvBool("DOH_ENABLED", true), DoHAPIURLs: dohURLs, DoHTimeout: dohTimeout, DoHCacheSize: dohCacheSize,
+		DoHEnabled: legacyEnabled, DoHAPIURLs: legacyURLs, DoHTimeout: dnsTimeout, DoHCacheSize: dnsCacheSize,
+		DomesticDNSEnabled: domesticEnabled, DomesticDNSURLs: domesticURLs, ForeignDNSEnabled: foreignEnabled, ForeignDNSURLs: foreignURLs,
+		DNSTimeout: dnsTimeout, DNSCacheSize: dnsCacheSize,
 		SyncUpstream: getenvBool("SYNC_UPSTREAM", false), UpstreamIndex: getenvBool("UPSTREAM_INDEX_ENABLED", true), Location: loc,
 	}, nil
+}
+
+func splitURLs(value string) []string {
+	var urls []string
+	for _, raw := range strings.Split(value, ",") {
+		if item := strings.TrimSpace(raw); item != "" {
+			urls = append(urls, item)
+		}
+	}
+	return urls
 }
 
 func getenv(k, fallback string) string {

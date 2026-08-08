@@ -417,6 +417,10 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		b.send(ctx, chatID, "已取消当前操作。", homeMenu())
 		return
 	}
+	if strings.HasPrefix(query.Data, "dns:details:") {
+		b.sendDNSDetails(ctx, chatID, query.Data)
+		return
+	}
 
 	b.mu.Lock()
 	pendingRule := b.sessions[chatID]
@@ -614,12 +618,12 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 	}
 	dnsText := formatDNSReport(result.Network)
 	geoText := formatGeoIPReport(result.Network)
-	suggestion, suggestedAction := geoSuggestion(result.Network)
+	suggestion, suggestionKind := geoSuggestion(result.Network)
 	root := result.Network.Registrable
 	if root == "" {
 		root = "未识别"
 	}
-	text := fmt.Sprintf("🔍 查询域名：%s\n👤 个人规则：%s\n📚 Aethersailor：%s\n🇨🇳 GEOSITE:CN：%s\n🧱 GEOSITE:GFW：%s\n\n🌐 DNS 解析：%s\n可注册域名：%s\n\n📡 中国大陆信号：%s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), dnsText, root, chinaSignal)
+	text := fmt.Sprintf("🔍 查询域名\n%s\n\n👤 个人规则\n%s\n\n📚 Aethersailor\n%s\n\n🇨🇳 GEOSITE:CN\n%s\n\n🧱 GEOSITE:GFW\n%s\n\n%s\n\n可注册域名：%s\n\n📡 中国大陆信号：%s", domainName, personal, strings.Join(upstreamText, "\n  "), strings.Join(geositeText, "；"), strings.Join(gfwText, "；"), dnsText, root, chinaSignal)
 	if geoText != "" {
 		text += "\n\n" + geoText
 	}
@@ -639,17 +643,25 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 		b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
 		b.mu.Unlock()
 	}
-	if suggestedAction != "" {
-		label := "💡 建议添加代理"
-		if suggestedAction == rules.Direct {
-			label = "💡 建议添加直连"
-		}
-		rows = append(rows, []button{{Text: label, Data: "suggest:" + string(suggestedAction)}})
-		if !hasDirect && !hasProxy {
-			b.mu.Lock()
-			b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
-			b.mu.Unlock()
-		}
+	if len(result.Network.GeoIPs) > 0 {
+		rows = append(rows, []button{{Text: "📍 查看全部 IP 归属", Data: "dns:details:all"}})
+	}
+	if len(result.Network.Domestic.A)+len(result.Network.Domestic.AAAA) > 0 {
+		rows = append(rows, []button{{Text: "🇨🇳 查看国内 DNS 详情", Data: "dns:details:domestic"}})
+	}
+	if len(result.Network.Foreign.A)+len(result.Network.Foreign.AAAA) > 0 {
+		rows = append(rows, []button{{Text: "🌍 查看国外 DNS 详情", Data: "dns:details:foreign"}})
+	}
+	if suggestionKind == "direct" || suggestionKind == "both" {
+		rows = append(rows, []button{{Text: "💡 建议添加直连", Data: "suggest:direct"}})
+	}
+	if suggestionKind == "proxy" || suggestionKind == "both" {
+		rows = append(rows, []button{{Text: "🚀 建议添加代理", Data: "suggest:proxy"}})
+	}
+	if len(result.Network.GeoIPs) > 0 || len(result.Network.Domestic.A)+len(result.Network.Domestic.AAAA)+len(result.Network.Foreign.A)+len(result.Network.Foreign.AAAA) > 0 {
+		b.mu.Lock()
+		b.sessions[chatID] = &pending{Mode: "query_override", OriginalDomain: domainName, Domain: domainName, RootDomain: domain.RuleRoot(domainName)}
+		b.mu.Unlock()
 	}
 	b.send(ctx, chatID, text, keyboard(rows))
 }
@@ -722,7 +734,7 @@ func (b *Bot) status(ctx context.Context, chatID int64) {
 	if provider == "" {
 		provider = "尚未使用"
 	}
-	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DoH：启用=%t · 缓存=%d · 最近=%s\nDoH 异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.CacheEntries, provider, dohError, b.service.SyncEnabled()), homeMenu())
+	b.send(ctx, chatID, fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n个人规则：%d 条\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n上游公开镜像：%t", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, b.service.SyncEnabled()), homeMenu())
 }
 
 func (b *Bot) helpText() string {
@@ -916,19 +928,94 @@ func repoProviderText(provider string) string {
 	return " GitHub"
 }
 
+func (b *Bot) sendDNSDetails(ctx context.Context, chatID int64, data string) {
+	b.mu.Lock()
+	p := b.sessions[chatID]
+	var domainName string
+	if p != nil {
+		domainName = p.Domain
+	}
+	b.mu.Unlock()
+	if domainName == "" {
+		b.send(ctx, chatID, "查询结果已过期，请重新查询域名。", homeMenu())
+		return
+	}
+	result, err := b.service.Query(ctx, domainName)
+	if err != nil {
+		b.send(ctx, chatID, "读取 DNS 详情失败："+err.Error(), homeMenu())
+		return
+	}
+	geo := make(map[string]lookup.GeoIPInfo, len(result.Network.GeoIPs))
+	for _, info := range result.Network.GeoIPs {
+		geo[info.IP] = info
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "📍 DNS/IP 详细结果\n查询域名：%s", domainName)
+	shown := 0
+	if data == "dns:details:domestic" || data == "dns:details:all" {
+		out.WriteString("\n\n🇨🇳 国内 DNS\n")
+		appendDNSGroupDetails(&out, result.Network.Domestic, geo, &shown)
+	}
+	if data == "dns:details:foreign" || data == "dns:details:all" {
+		out.WriteString("\n\n🌍 国外 DNS\n")
+		appendDNSGroupDetails(&out, result.Network.Foreign, geo, &shown)
+	}
+	b.send(ctx, chatID, out.String(), homeMenu())
+}
+
+func appendDNSGroupDetails(out *strings.Builder, group lookup.DNSGroupResult, geo map[string]lookup.GeoIPInfo, shown *int) {
+	provider := displayDNSProvider(group.Provider)
+	if provider == "" {
+		provider = "未使用"
+	}
+	status := "主端点"
+	if group.UsedBackup {
+		status = "备用端点"
+	}
+	fmt.Fprintf(out, "端点：%s\n状态：%s\n", provider, status)
+	if group.Error != "" && len(group.A)+len(group.AAAA) == 0 {
+		fmt.Fprintf(out, "错误：%s", group.Error)
+		return
+	}
+	index := 0
+	total := len(group.A) + len(group.AAAA)
+	for _, record := range []struct {
+		kind string
+		ips  []string
+	}{{"A", group.A}, {"AAAA", group.AAAA}} {
+		for _, ip := range record.ips {
+			if *shown >= 8 {
+				continue
+			}
+			index++
+			*shown++
+			info, ok := geo[ip]
+			fmt.Fprintf(out, "\n%d. %s\nIP：%s", index, record.kind, ip)
+			if !ok || info.Error != "" {
+				if ok && info.Error != "" {
+					fmt.Fprintf(out, "\n归属：检测失败（%s）", info.Error)
+				} else {
+					out.WriteString("\n归属：未查询")
+				}
+				continue
+			}
+			fmt.Fprintf(out, "\n归属：%s", geoPlace(info))
+		}
+	}
+	if index == 0 {
+		if total == 0 {
+			out.WriteString("无有效 A/AAAA 地址")
+		} else {
+			fmt.Fprintf(out, "其余 %d 个地址未显示", total)
+		}
+	} else if total > index {
+		fmt.Fprintf(out, "\n… 本组其余 %d 个地址未显示", total-index)
+	}
+}
+
 func formatDNSReport(report lookup.Report) string {
 	var out strings.Builder
-	switch report.DNSSource {
-	case "doh":
-		fmt.Fprintf(&out, "公网 DoH · %s", report.DoHProvider)
-		if report.DoHCacheHit {
-			out.WriteString("（缓存）")
-		}
-	case "local":
-		out.WriteString("本地 DNS")
-	default:
-		out.WriteString("未取得真实结果")
-	}
+	out.WriteString("🌐 DNS 解析摘要")
 	if len(report.FakeIP) > 0 {
 		fmt.Fprintf(&out, "\n本地 DNS：Fake-IP %d", len(report.FakeIP))
 	} else if report.DNSError != "" {
@@ -936,53 +1023,82 @@ func formatDNSReport(report lookup.Report) string {
 	} else {
 		fmt.Fprintf(&out, "\n本地 DNS：A %d · AAAA %d", len(report.LocalA), len(report.LocalAAAA))
 	}
-	fmt.Fprintf(&out, "\n真实结果：A %d · AAAA %d", len(report.A), len(report.AAAA))
-	addresses := append(append([]string{}, report.A...), report.AAAA...)
-	if len(addresses) > 0 {
-		display := addresses
-		if len(display) > 4 {
-			display = display[:4]
-		}
-		fmt.Fprintf(&out, "\n真实 IP：%s", strings.Join(display, "、"))
-		if len(addresses) > len(display) {
-			fmt.Fprintf(&out, "（另有 %d 个）", len(addresses)-len(display))
-		}
-	}
-	if report.DoHError != "" {
-		fmt.Fprintf(&out, "\nDoH：失败（%s）", report.DoHError)
-	}
+	out.WriteString("\n\n🇨🇳 国内 DNS\n")
+	out.WriteString(formatDNSGroupSummary(report.Domestic, "国内 DNS"))
+	out.WriteString("\n\n🌍 国外 DNS\n")
+	out.WriteString(formatDNSGroupSummary(report.Foreign, "国外 DNS"))
+	fmt.Fprintf(&out, "\n\n合计真实地址：A %d · AAAA %d", len(report.A), len(report.AAAA))
 	return out.String()
 }
 
 func formatGeoIPReport(report lookup.Report) string {
 	if len(report.GeoIPs) == 0 {
-		return "📍 IP 地域解析：未取得"
+		return "📍 IP 归属：未取得真实地址或 GeoIP 结果"
 	}
-	var out strings.Builder
-	out.WriteString("📍 IP 地域解析：")
-	shown := 0
+	china, foreign, failed := 0, 0, 0
 	for _, info := range report.GeoIPs {
-		if shown >= 8 {
-			break
-		}
-		shown++
-		out.WriteString("\n  ")
 		if info.Error != "" {
-			fmt.Fprintf(&out, "%s → 检测失败（%s）", info.IP, info.Error)
+			failed++
 			continue
 		}
-		place := geoPlace(info)
 		if info.China {
-			place = "🇨🇳 " + place
+			china++
 		} else {
-			place = "🌐 " + place
+			foreign++
 		}
-		fmt.Fprintf(&out, "%s → %s", info.IP, place)
 	}
-	if len(report.GeoIPs) > shown {
-		fmt.Fprintf(&out, "\n  … 其余 %d 个地址未显示", len(report.GeoIPs)-shown)
+	text := fmt.Sprintf("📍 IP 归属：已检查 %d 个 · 🇨🇳 中国大陆 %d · 🌐 境外 %d", china+foreign, china, foreign)
+	if failed > 0 {
+		text += fmt.Sprintf(" · ⚠️ 失败 %d 个", failed)
 	}
-	return out.String()
+	return text
+}
+
+func formatDNSGroupSummary(group lookup.DNSGroupResult, label string) string {
+	if group.Error != "" && len(group.A)+len(group.AAAA) == 0 {
+		return "状态：失败（" + group.Error + "）"
+	}
+	provider := displayDNSProvider(group.Provider)
+	status := "主端点"
+	if group.UsedBackup {
+		status = "备用端点"
+	}
+	if group.CacheHit {
+		status += " · 缓存"
+	}
+	if provider == "" {
+		provider = label
+	}
+	addresses := append(append([]string{}, group.A...), group.AAAA...)
+	if len(addresses) > 4 {
+		addresses = addresses[:4]
+	}
+	text := fmt.Sprintf("端点：%s\n状态：成功 · %s\nA %d · AAAA %d", provider, status, len(group.A), len(group.AAAA))
+	if len(addresses) > 0 {
+		text += "\nIP：" + strings.Join(addresses, "、")
+		if total := len(group.A) + len(group.AAAA); total > len(addresses) {
+			text += fmt.Sprintf("（另有 %d 个）", total-len(addresses))
+		}
+	}
+	if group.Error != "" {
+		text += "\n备用说明：" + group.Error
+	}
+	return text
+}
+
+func displayDNSProvider(provider string) string {
+	switch strings.ToLower(provider) {
+	case "dns.alidns.com":
+		return "阿里云"
+	case "doh.pub":
+		return "腾讯 DNSPod"
+	case "cloudflare-dns.com":
+		return "Cloudflare"
+	case "dns.google":
+		return "Google"
+	default:
+		return provider
+	}
 }
 
 func geoPlace(info lookup.GeoIPInfo) string {
@@ -1016,7 +1132,7 @@ func geoPlace(info lookup.GeoIPInfo) string {
 	return strings.Join(parts, " · ")
 }
 
-func geoSuggestion(report lookup.Report) (string, rules.Action) {
+func geoSuggestion(report lookup.Report) (string, string) {
 	if len(report.GeoIPs) == 0 || report.ChinaChecked == 0 {
 		return "💡 建议：暂时无法根据 IP 地域判断直连或代理。", ""
 	}
@@ -1033,10 +1149,10 @@ func geoSuggestion(report lookup.Report) (string, rules.Action) {
 	}
 	switch {
 	case foreign > 0 && china == 0:
-		return "💡 建议：真实 IP 均在中国大陆以外，通常建议添加到「代理」规则。CDN 位置可能变化，请结合实际访问情况确认。", rules.Proxy
+		return "💡 建议：真实 IP 均在中国大陆以外，通常建议添加到「代理」规则。CDN 位置可能变化，请结合实际访问情况确认。", "proxy"
 	case china > 0 && foreign == 0:
-		return "💡 建议：中国大陆真实 IP，通常建议添加到「直连」规则。若服务仍不可达，再改为代理。", rules.Direct
+		return "💡 建议：中国大陆真实 IP，通常建议添加到「直连」规则。若服务仍不可达，再改为代理。", "direct"
 	default:
-		return "💡 建议：该域名同时解析到中国大陆和境外地址，地域会随 CDN 变化，建议优先使用「代理」规则。", rules.Proxy
+		return "💡 建议：该域名同时解析到中国大陆和境外地址，地域会随 CDN 变化，请人工选择直连或代理。", "both"
 	}
 }

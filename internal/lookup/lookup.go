@@ -17,10 +17,30 @@ import (
 )
 
 type DoHConfig struct {
+	// Enabled/Endpoints are retained for backwards compatibility with the
+	// original single DoH configuration and older tests.
 	Enabled   bool
 	Endpoints []string
+	Domestic  DNSGroupConfig
+	Foreign   DNSGroupConfig
 	Timeout   time.Duration
 	CacheSize int
+}
+
+type DNSGroupConfig struct {
+	Enabled   bool
+	Endpoints []string
+}
+
+type DNSGroupResult struct {
+	Group      string
+	Provider   string
+	Endpoint   string
+	UsedBackup bool
+	A          []string
+	AAAA       []string
+	CacheHit   bool
+	Error      string
 }
 
 type Report struct {
@@ -37,6 +57,8 @@ type Report struct {
 	DoHError          string
 	DoHCacheHit       bool
 	GeoIPs            []GeoIPInfo
+	Domestic          DNSGroupResult
+	Foreign           DNSGroupResult
 }
 
 // GeoIPInfo is the per-address result returned by the configured GeoIP API.
@@ -58,6 +80,8 @@ type GeoIPInfo struct {
 
 type Status struct {
 	Enabled      bool
+	Domestic     bool
+	Foreign      bool
 	CacheEntries int
 	LastProvider string
 	LastError    string
@@ -83,23 +107,32 @@ type Inspector struct {
 	mu       sync.Mutex
 	geoCache map[string]geoCacheEntry
 	status   Status
+	legacy   bool
 }
 
 func New(apiURL string, doh DoHConfig) *Inspector {
+	legacy := len(doh.Domestic.Endpoints) == 0 && len(doh.Foreign.Endpoints) == 0 && len(doh.Endpoints) > 0
 	if doh.Timeout <= 0 {
 		doh.Timeout = 4 * time.Second
 	}
 	if doh.CacheSize <= 0 {
 		doh.CacheSize = 2048
 	}
+	// A caller using the legacy single-group fields keeps the old behaviour.
+	// Production configuration supplies Domestic/Foreign explicitly.
+	if len(doh.Domestic.Endpoints) == 0 && len(doh.Foreign.Endpoints) == 0 && len(doh.Endpoints) > 0 {
+		doh.Foreign = DNSGroupConfig{Enabled: doh.Enabled, Endpoints: append([]string(nil), doh.Endpoints...)}
+		doh.Domestic = DNSGroupConfig{}
+	}
 	cache, _ := lru.New[string, dohCacheEntry](doh.CacheSize)
 	httpClient := req.C().
 		SetTimeout(5*time.Second).
 		SetCommonRetryCount(2).
 		SetCommonRetryBackoffInterval(250*time.Millisecond, 1500*time.Millisecond)
+	enabled := doh.Enabled || doh.Domestic.Enabled || doh.Foreign.Enabled
 	return &Inspector{
 		apiURL: apiURL, resolver: net.DefaultResolver, http: httpClient, doh: doh,
-		dohCache: cache, geoCache: map[string]geoCacheEntry{}, status: Status{Enabled: doh.Enabled},
+		dohCache: cache, geoCache: map[string]geoCacheEntry{}, status: Status{Enabled: enabled, Domestic: doh.Domestic.Enabled, Foreign: doh.Foreign.Enabled}, legacy: legacy,
 	}
 }
 
@@ -114,7 +147,14 @@ func (i *Inspector) Inspect(ctx context.Context, name string) Report {
 		i.classifyLocal(&r, addrs)
 	}
 
-	if len(r.A)+len(r.AAAA) > 0 {
+	if i.hasGroups() {
+		r.Domestic, r.Foreign = i.resolveGroups(ctx, name)
+		r.A, r.AAAA = nil, nil
+		i.mergeGroupAddresses(&r)
+		if len(r.A)+len(r.AAAA) > 0 {
+			r.DNSSource = "dual"
+		}
+	} else if len(r.A)+len(r.AAAA) > 0 {
 		r.DNSSource = "local"
 	} else if i.doh.Enabled {
 		result, provider, cacheHit, dohErr := i.resolveDoH(ctx, name)
@@ -147,7 +187,14 @@ func (i *Inspector) Inspect(ctx context.Context, name string) Report {
 func (i *Inspector) inspectAddresses(ctx context.Context, name string, addrs []net.IPAddr) Report {
 	r := Report{Registrable: domain.Registrable(name)}
 	i.classifyLocal(&r, addrs)
-	if len(r.A)+len(r.AAAA) > 0 {
+	if i.hasGroups() {
+		r.Domestic, r.Foreign = i.resolveGroups(ctx, name)
+		r.A, r.AAAA = nil, nil
+		i.mergeGroupAddresses(&r)
+		if len(r.A)+len(r.AAAA) > 0 {
+			r.DNSSource = "dual"
+		}
+	} else if len(r.A)+len(r.AAAA) > 0 {
 		r.DNSSource = "local"
 	} else if i.doh.Enabled {
 		result, provider, cacheHit, err := i.resolveDoH(ctx, name)
@@ -172,6 +219,120 @@ func (i *Inspector) inspectAddresses(ctx context.Context, name string, addrs []n
 	}
 	i.inspectGeoIP(ctx, &r)
 	return r
+}
+
+func (i *Inspector) hasGroups() bool {
+	return !i.legacy && (len(i.doh.Domestic.Endpoints) > 0 || len(i.doh.Foreign.Endpoints) > 0)
+}
+
+func (i *Inspector) resolveGroups(ctx context.Context, name string) (DNSGroupResult, DNSGroupResult) {
+	type one struct {
+		result DNSGroupResult
+	}
+	ch := make(chan one, 2)
+	go func() { ch <- one{result: i.resolveGroup(ctx, name, "domestic", i.doh.Domestic)} }()
+	go func() { ch <- one{result: i.resolveGroup(ctx, name, "foreign", i.doh.Foreign)} }()
+	var domestic, foreign DNSGroupResult
+	for range 2 {
+		result := (<-ch).result
+		if result.Group == "domestic" {
+			domestic = result
+		} else {
+			foreign = result
+		}
+	}
+	return domestic, foreign
+}
+
+func (i *Inspector) resolveGroup(ctx context.Context, name, group string, cfg DNSGroupConfig) DNSGroupResult {
+	result := DNSGroupResult{Group: group}
+	if !cfg.Enabled || len(cfg.Endpoints) == 0 {
+		result.Error = "未启用"
+		return result
+	}
+	var errors []string
+	for index, endpoint := range cfg.Endpoints {
+		ch := make(chan struct {
+			ips []string
+			hit bool
+			err error
+		}, 2)
+		for _, recordType := range []string{"A", "AAAA"} {
+			go func(recordType string) {
+				ips, hit, err := i.queryDoH(ctx, endpoint, name, recordType)
+				ch <- struct {
+					ips []string
+					hit bool
+					err error
+				}{ips: ips, hit: hit, err: err}
+			}(recordType)
+		}
+		var ips []string
+		cacheHit := true
+		for range 2 {
+			one := <-ch
+			cacheHit = cacheHit && one.hit
+			if one.err != nil {
+				errors = append(errors, providerName(endpoint)+" "+one.err.Error())
+				continue
+			}
+			for _, ip := range one.ips {
+				if !isFakeIP(ip) {
+					ips = appendUnique(ips, ip)
+				}
+			}
+		}
+		if len(ips) == 0 {
+			continue
+		}
+		result.Provider = providerName(endpoint)
+		result.Endpoint = endpoint
+		result.UsedBackup = index > 0
+		result.CacheHit = cacheHit
+		for _, ip := range ips {
+			addr, err := netip.ParseAddr(ip)
+			if err != nil {
+				continue
+			}
+			if addr.Is4() {
+				result.A = appendUnique(result.A, ip)
+			} else {
+				result.AAAA = appendUnique(result.AAAA, ip)
+			}
+		}
+		if index > 0 && len(errors) > 0 {
+			result.Error = "主端点失败，已切换备用：" + compact(strings.Join(errors, "；"))
+		}
+		i.setDoHStatus(result.Provider, nil)
+		return result
+	}
+	if len(errors) > 0 {
+		result.Error = compact(strings.Join(errors, "；"))
+		i.setDoHStatus(providerNameForGroup(group), fmt.Errorf("%s", result.Error))
+	} else {
+		result.Error = "主备端点均未返回有效 A/AAAA"
+	}
+	return result
+}
+
+func providerNameForGroup(group string) string {
+	if group == "domestic" {
+		return "国内 DNS"
+	}
+	return "国外 DNS"
+}
+
+func (i *Inspector) mergeGroupAddresses(r *Report) {
+	for _, group := range []DNSGroupResult{r.Domestic, r.Foreign} {
+		for _, ip := range group.A {
+			r.A = appendUnique(r.A, ip)
+		}
+		for _, ip := range group.AAAA {
+			r.AAAA = appendUnique(r.AAAA, ip)
+		}
+	}
+	sort.Strings(r.A)
+	sort.Strings(r.AAAA)
 }
 
 func (i *Inspector) classifyLocal(r *Report, addrs []net.IPAddr) {

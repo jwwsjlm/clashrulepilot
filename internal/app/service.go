@@ -72,7 +72,12 @@ func New(cfg config.Config) (*Service, error) {
 	default:
 		return nil, fmt.Errorf("unsupported rule repository provider %q", cfg.RuleRepoProvider)
 	}
-	return &Service{cfg: cfg, repo: repo, upstream: syncer.New(cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), index: ruleindex.New(cfg.UpstreamIndex, cfg.DataDir, cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), lookup: lookup.New(cfg.GeoIPAPIURL, lookup.DoHConfig{Enabled: cfg.DoHEnabled, Endpoints: cfg.DoHAPIURLs, Timeout: cfg.DoHTimeout, CacheSize: cfg.DoHCacheSize})}, nil
+	return &Service{cfg: cfg, repo: repo, upstream: syncer.New(cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), index: ruleindex.New(cfg.UpstreamIndex, cfg.DataDir, cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), lookup: lookup.New(cfg.GeoIPAPIURL, lookup.DoHConfig{
+		Enabled: cfg.DoHEnabled, Endpoints: cfg.DoHAPIURLs,
+		Domestic: lookup.DNSGroupConfig{Enabled: cfg.DomesticDNSEnabled, Endpoints: cfg.DomesticDNSURLs},
+		Foreign:  lookup.DNSGroupConfig{Enabled: cfg.ForeignDNSEnabled, Endpoints: cfg.ForeignDNSURLs},
+		Timeout:  cfg.DNSTimeout, CacheSize: cfg.DNSCacheSize,
+	})}, nil
 }
 func (s *Service) Ready() bool                   { s.mu.Lock(); defer s.mu.Unlock(); return s.ready }
 func (s *Service) Close() error                  { return s.index.Close() }

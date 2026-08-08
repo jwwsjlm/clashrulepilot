@@ -42,3 +42,11 @@ Bot 仍生成 Mihomo `classical` rule-provider 文件用于兼容和查看，但
 个人规则必须排在上游规则之前，否则上游规则可能先命中。显式规则按精确度排序，使更具体的子域名规则能够覆盖较宽的主域名规则。
 
 ClashRulePilot 生成的 `personal-overwrite.ini` 使用 `[YAML]` 和 `+rules` 前置插入。根据权威指南第 8 章，OpenClash 会先下载远程覆写到 `/etc/openclash/overwrite/`，再将覆写内容合并到运行配置。Bot 的本地 Aethersailor 索引只用于查询，不参与路由器防火墙链，也不会改变 nftables/iptables 透明代理规则。
+
+## Bot 双 DNS 查询说明
+
+Bot 的国内/国外 DNS 查询是独立的公网 JSON DNS 查询，仅用于比较不同解析视图、获取真实 IP 和调用 GeoIP API，不会替换 OpenClash 的 DNS 配置，也不会写入 Mihomo 运行时 DNS。
+
+默认端点为：国内阿里云 `/resolve` 主、腾讯 DNSPod 备；国外 Cloudflare 主、Google 备。两组并行执行，组内按主备故障转移。OpenClash 使用 Fake-IP 时，Bot 会过滤 `198.18.0.0/15` 和对应 Fake-IP 地址，不把合成地址交给 GeoIP。
+
+排障 OpenClash 本身时仍应先检查 **系统 → 软件包**，再从 **服务 → OpenClash → 插件设置 → 调试日志 → 生成** 获取完整日志；Bot 的公网 DNS 结果不能替代 OpenClash 调试日志。

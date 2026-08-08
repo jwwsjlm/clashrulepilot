@@ -166,6 +166,49 @@ func TestRealLocalDNSDoesNotCallDoH(t *testing.T) {
 	}
 }
 
+func TestDualDNSGroupsRunInParallelAndKeepSources(t *testing.T) {
+	var domesticCalls, foreignCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/geo/") {
+			_, _ = w.Write([]byte(`{"success":true,"country":"United States","country_code":"US","connection":{"isp":"Example ISP","asn":"AS13335"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-json")
+		if strings.HasPrefix(r.URL.Path, "/domestic") {
+			domesticCalls.Add(1)
+			if r.URL.Query().Get("type") == "A" {
+				_, _ = w.Write([]byte(`{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"1.1.1.1"}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"Status":0,"Answer":[]}`))
+			}
+			return
+		}
+		foreignCalls.Add(1)
+		if r.URL.Query().Get("type") == "A" {
+			_, _ = w.Write([]byte(`{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"8.8.8.8"}]}`))
+		} else {
+			_, _ = w.Write([]byte(`{"Status":0,"Answer":[]}`))
+		}
+	}))
+	defer server.Close()
+
+	inspector := New(server.URL+"/geo/{ip}", DoHConfig{
+		Domestic: DNSGroupConfig{Enabled: true, Endpoints: []string{server.URL + "/domestic"}},
+		Foreign:  DNSGroupConfig{Enabled: true, Endpoints: []string{server.URL + "/foreign"}},
+		Timeout:  time.Second, CacheSize: 16,
+	})
+	report := inspector.inspectAddresses(context.Background(), "example.com", []net.IPAddr{{IP: net.ParseIP("198.18.0.2")}})
+	if report.DNSSource != "dual" || len(report.Domestic.A) != 1 || report.Domestic.A[0] != "1.1.1.1" || len(report.Foreign.A) != 1 || report.Foreign.A[0] != "8.8.8.8" {
+		t.Fatalf("unexpected dual report: %+v", report)
+	}
+	if domesticCalls.Load() != 2 || foreignCalls.Load() != 2 {
+		t.Fatalf("expected A and AAAA for both groups, domestic=%d foreign=%d", domesticCalls.Load(), foreignCalls.Load())
+	}
+	if len(report.GeoIPs) != 2 || report.ChinaChecked != 2 || report.China {
+		t.Fatalf("unexpected GeoIP aggregation: %+v", report)
+	}
+}
+
 func TestLiveDoH(t *testing.T) {
 	if os.Getenv("CLASHRULEPILOT_LIVE_TEST") == "" {
 		t.Skip("set CLASHRULEPILOT_LIVE_TEST=1 to test public DoH")
@@ -182,5 +225,21 @@ func TestLiveDoH(t *testing.T) {
 	report := inspector.inspectAddresses(context.Background(), "gw2.oops.asia", []net.IPAddr{{IP: net.ParseIP("198.18.0.96")}})
 	if report.DNSSource != "doh" || len(report.A)+len(report.AAAA) == 0 {
 		t.Fatalf("live DoH failed: %+v", report)
+	}
+}
+
+func TestLiveDualDNS(t *testing.T) {
+	if os.Getenv("CLASHRULEPILOT_LIVE_TEST") == "" {
+		t.Skip("set CLASHRULEPILOT_LIVE_TEST=1 to test public dual DNS")
+	}
+	inspector := New("", DoHConfig{
+		Domestic:  DNSGroupConfig{Enabled: true, Endpoints: []string{"https://dns.alidns.com/resolve", "https://doh.pub/dns-query"}},
+		Foreign:   DNSGroupConfig{Enabled: true, Endpoints: []string{"https://cloudflare-dns.com/dns-query", "https://dns.google/resolve"}},
+		Timeout:   5 * time.Second,
+		CacheSize: 16,
+	})
+	report := inspector.inspectAddresses(context.Background(), "legendsen.se", []net.IPAddr{{IP: net.ParseIP("198.18.0.96")}})
+	if report.DNSSource != "dual" || len(report.Domestic.A)+len(report.Domestic.AAAA) == 0 || len(report.Foreign.A)+len(report.Foreign.AAAA) == 0 {
+		t.Fatalf("live dual DNS failed: %+v", report)
 	}
 }
