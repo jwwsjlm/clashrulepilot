@@ -1,4 +1,6 @@
 FROM golang:1.26 AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 ENV GOPROXY=https://proxy.golang.org,direct
 COPY go.mod go.sum ./
@@ -10,7 +12,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     done; exit 1
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/clashrulepilot ./cmd/clashrulepilot && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w' -o /out/clashrulepilot ./cmd/clashrulepilot && \
     mkdir -p /out/app/data && touch /out/app/data/.keep
 
 FROM gcr.io/distroless/static-debian12:nonroot

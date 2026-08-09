@@ -43,6 +43,29 @@ Bot 仍生成 Mihomo `classical` rule-provider 文件用于兼容和查看，但
 
 ClashRulePilot 生成的 `personal-overwrite.ini` 使用 `[YAML]` 和 `+rules` 前置插入。根据权威指南第 8 章，OpenClash 会先下载远程覆写到 `/etc/openclash/overwrite/`，再将覆写内容合并到运行配置。Bot 的本地 Aethersailor 索引只用于查询，不参与路由器防火墙链，也不会改变 nftables/iptables 透明代理规则。
 
+## OpenClash 覆写自检边界
+
+Bot 状态页中的 **🧪 OpenClash 覆写自检** 只检查发布侧，主要验证：
+
+- GitHub/GitLab 仓库、目标分支和 Raw 文件是否可访问；
+- `data/personal_rules.json`、程序重新渲染结果和 `openclash/personal-overwrite.ini` 是否一致；
+- `[YAML]`、`+rules`、UTF-8、YAML 语法、字段数量、去重和规则顺序是否正确；
+- 代理策略组名称是否为空，以及是否存在危险的宽泛规则。
+
+首版不会连接 OpenWrt 路由器，因此自检通过只代表“远程覆写文件可以被 OpenClash 下载并解析”，不能证明订阅中确实存在对应策略组，也不能证明路由器已经启用该覆写。
+
+在 LuCI 中确认启用路径：
+
+**服务 → OpenClash → 配置订阅 → 编辑当前订阅 → 远程覆写**
+
+权威指南第 8 章说明：远程覆写会下载到 `/etc/openclash/overwrite/`；`[YAML]` 段中的 `+rules` 会在订阅 YAML 转换过程中追加到运行配置的规则前部。因此个人精确规则和更深层级后缀规则应排在宽泛上游规则之前。
+
+如果发布侧自检全部正常但规则仍未生效：
+
+1. 先到 **系统 → 软件包** 检查 OpenClash 依赖是否完整；
+2. 再到 **服务 → OpenClash → 插件设置 → 调试日志 → 生成** 获取调试日志；
+3. 检查订阅实际策略组是否包含配置的 `PROXY_POLICY_GROUP`，例如 `🚀 手动选择`。
+
 ## Bot 双 DNS 查询说明
 
 Bot 的国内/国外 DNS 查询是独立的公网 JSON DNS 查询，仅用于比较不同解析视图、获取真实 IP 和调用 GeoIP API，不会替换 OpenClash 的 DNS 配置，也不会写入 Mihomo 运行时 DNS。

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"clashrulepilot/internal/app"
 	"clashrulepilot/internal/lookup"
 	"clashrulepilot/internal/rules"
 	"github.com/go-telegram/bot/models"
@@ -556,5 +557,14 @@ func TestSessionOwnerIsolation(t *testing.T) {
 	}
 	if !b.bindSessionOwner(200, 2) {
 		t.Fatal("different chat should remain isolated")
+	}
+}
+
+func TestQueryProgressListsIndependentNetworkStages(t *testing.T) {
+	text := queryProgressText("example.com", app.QueryProgress{Stage: "network", Timing: app.QueryTiming{Personal: time.Millisecond, Upstream: 2 * time.Millisecond, Total: time.Second}})
+	for _, expected := range []string{"👤 个人规则：✅ 完成", "📚 Aethersailor/GEOSITE：✅ 完成", "🏠 本地 DNS：🔄 查询中", "🇨🇳 国内 DNS：🔄 查询中", "🌍 国外 DNS：🔄 查询中", "📍 GeoIP：⏸ 等待 DNS"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("query progress missing %q:\n%s", expected, text)
+		}
 	}
 }

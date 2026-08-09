@@ -7,12 +7,15 @@
 - 定时列出 `Aethersailor/Custom_OpenClash_Rules/rule`，只下载当前的 `*_Domain.yaml`，并额外下载 GEOSITE:CN、GEOSITE:GFW 建立本地查询索引；不拉取整个仓库、`.mrs`、IP 或端口规则。
 - 支持从域名、URL、`host:port` 和完整 OpenClash/Mihomo 日志智能提取目标域名。
 - 查询个人规则、Aethersailor、GEOSITE:CN、GEOSITE:GFW、DNS 和大陆 IP 信号；本地返回 Fake-IP 时自动通过公网 DoH 获取真实地址。
-- 个人规则启动时同步到 `/app/data/personal_rules.cache.json`，查询优先使用本地缓存；GitLab/GitHub 短暂 EOF 时不会阻塞上游规则、DNS 和 GeoIP 查询，缓存每次 Bot 提交成功后原子更新。
+- 个人规则缓存、远端版本、权限状态和离线待提交队列保存在 `/app/data/runtime-state.db`；查询只读本地快照，写入前强制刷新远端版本并进行乐观并发检查。
+- GitLab/GitHub 暂时不可用时，已确认操作进入持久化队列；仓库恢复后自动重放，远端冲突则暂停并要求重新确认。
 - 上游代理/直连规则可通过 Telegram 双向覆写为个人规则。
 - Telegram 私聊白名单默认只有 `538031590`。
 - 添加规则时智能选择精确域名、当前域名及下级或安全主域名；高级菜单支持关键词、通配符和正则，冲突时二次确认移动。
 - 删除个人规则和将已有规则在直连/代理分组之间移动时，Bot 会先列出受影响规则并要求二次确认；重复点击不会重复提交。
 - GitHub Trees API 或 GitLab Commits API 原子提交，避免多文件半更新。
+- 运行状态提供 Token 权限、Raw 可用性、同步任务和 OpenClash 覆写自检；Token 无写权限时自动降级为只读查询模式。
+- 相同域名的并发 DNS/GeoIP 查询通过 `singleflight` 合并，结果显示耗时和是否复用共享请求。
 
 外部服务协议优先使用成熟开源库：Telegram 使用 `go-telegram/bot`，国家代码与国旗使用 `biter777/countries`，中文国家名使用 `golang.org/x/text`，GitHub 使用 `google/go-github`，GitLab 使用官方 `api/client-go`，YAML 使用 `goccy/go-yaml`，GeoIP HTTPS 使用你的 `jwwsjlm/req/v3`，其他下载重试使用 `go-retryablehttp`。完整版本和许可证见 [docs/open-source-dependencies.md](docs/open-source-dependencies.md)。
 
@@ -23,7 +26,7 @@
 3. 执行 `docker compose pull && docker compose up -d`。
 4. 查看 `docker compose logs -f clashrulepilot`，确认仓库初始化、索引同步和 Telegram polling 均成功。
 
-容器启动时只使用 root 对 `DATA_DIR` 自动修正所有权，随后立即降权为 UID/GID `65532` 再启动 GitHub、Telegram、定时同步和健康检查。默认 `./data:/app/data` 不需要手动执行 `chmod` 或 `chown`，也不会修改父目录、`.env` 或 Compose 文件。
+容器启动时只使用 root 对 `DATA_DIR` 自动修正所有权，随后立即降权为 UID/GID `65532` 再启动仓库预检、Telegram 和定时同步。默认 `./data:/app/data` 不需要手动执行 `chmod` 或 `chown`，也不会修改父目录、`.env` 或 Compose 文件。
 
 新版默认 `DATA_DIR=/app/data`。为兼容旧部署，如果仍配置为 `/data` 且根文件系统只读，程序会自动切换到 `/app/data`；仍建议在 `.env` 中更新为新路径，避免产生兼容提示。
 
@@ -84,6 +87,13 @@ DNS_FOREIGN_ENABLED=true
 DNS_FOREIGN_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve
 DNS_TIMEOUT=4s
 DNS_CACHE_SIZE=2048
+QUERY_TIMEOUT=15s
+QUERY_PROGRESS_INTERVAL=800ms
+STORE_REFRESH_INTERVAL=5m
+MUTATION_RETRY_INTERVAL=1m
+MUTATION_QUEUE_LIMIT=500
+PREFLIGHT_INTERVAL=5m
+SYNC_TIMEOUT=10m
 DOH_ENABLED=true
 DOH_API_URLS=https://cloudflare-dns.com/dns-query,https://dns.google/resolve
 DOH_TIMEOUT=4s
@@ -108,11 +118,21 @@ Bot 默认只展示安全的 `DOMAIN` 和两种 `DOMAIN-SUFFIX` 范围，高级�
 
 ## OpenClash 接入
 
-公开规则仓库创建后，在 **服务 → OpenClash → 覆写设置 → 覆写模块** 中订阅 `openclash/personal-overwrite.ini` 的 Raw 地址，类型选择远程/HTTP，目标配置选择“所有配置文件”。
+公开规则仓库创建后，在 **服务 → OpenClash → 配置订阅 → 编辑当前订阅 → 远程覆写** 中订阅 `openclash/personal-overwrite.ini` 的 Raw 地址，类型选择远程/HTTP，目标配置选择“所有配置文件”。Bot 的 **运行状态 → OpenClash 覆写自检** 可验证仓库文件、Raw 地址、`[YAML]`、`+rules`、规则数量和排序是否一致。
 
 该文件通过 `[YAML]` 的显式 `+rules` 把每条个人规则插入订阅规则之前，并按“精确规则、深层后缀、浅层后缀、通配符、关键词、正则”排序。这样相反动作的精确子域名可以作为主域名规则的例外。OpenClash 中原有 Aethersailor 覆写无需删除。
 
 OpenClash 专项行为规范见 [docs/openclash-guide.md](docs/openclash-guide.md)。
+
+## 多架构镜像
+
+Dockerfile 支持 BuildKit 的 `TARGETOS`、`TARGETARCH`，发布脚本同时生成 `linux/amd64` 和 `linux/arm64`：
+
+```powershell
+.\scripts\publish.ps1
+```
+
+脚本依次执行测试、race、vet、双架构推送和远端 Manifest 检查，默认标签仍为 `guanren/clashrulepilot:latest`。
 
 ## 许可证与上游署名
 

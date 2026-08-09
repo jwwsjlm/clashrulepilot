@@ -19,25 +19,32 @@ type Config struct {
 	GitLabToken      string
 	GitLabBaseURL    string
 
-	UpstreamRepo       string
-	UpstreamBranch     string
-	ProxyPolicyGroup   string
-	SyncCron           string
-	DataDir            string
-	GeoIPAPIURL        string
-	DoHEnabled         bool
-	DoHAPIURLs         []string
-	DoHTimeout         time.Duration
-	DoHCacheSize       int
-	DomesticDNSEnabled bool
-	DomesticDNSURLs    []string
-	ForeignDNSEnabled  bool
-	ForeignDNSURLs     []string
-	DNSTimeout         time.Duration
-	DNSCacheSize       int
-	SyncUpstream       bool
-	UpstreamIndex      bool
-	Location           *time.Location
+	UpstreamRepo          string
+	UpstreamBranch        string
+	ProxyPolicyGroup      string
+	SyncCron              string
+	DataDir               string
+	GeoIPAPIURL           string
+	DoHEnabled            bool
+	DoHAPIURLs            []string
+	DoHTimeout            time.Duration
+	DoHCacheSize          int
+	DomesticDNSEnabled    bool
+	DomesticDNSURLs       []string
+	ForeignDNSEnabled     bool
+	ForeignDNSURLs        []string
+	DNSTimeout            time.Duration
+	DNSCacheSize          int
+	SyncUpstream          bool
+	UpstreamIndex         bool
+	StoreRefreshInterval  time.Duration
+	MutationRetryInterval time.Duration
+	MutationQueueLimit    int
+	QueryTimeout          time.Duration
+	QueryProgressInterval time.Duration
+	SyncTimeout           time.Duration
+	PreflightInterval     time.Duration
+	Location              *time.Location
 }
 
 func Load() (Config, error) {
@@ -86,6 +93,34 @@ func Load() (Config, error) {
 	if foreignEnabled && len(foreignURLs) == 0 {
 		return Config{}, fmt.Errorf("DNS_FOREIGN_URLS must contain at least one endpoint when DNS_FOREIGN_ENABLED=true")
 	}
+	storeRefresh, err := positiveDuration("STORE_REFRESH_INTERVAL", "5m")
+	if err != nil {
+		return Config{}, err
+	}
+	mutationRetry, err := positiveDuration("MUTATION_RETRY_INTERVAL", "1m")
+	if err != nil {
+		return Config{}, err
+	}
+	queryTimeout, err := positiveDuration("QUERY_TIMEOUT", "15s")
+	if err != nil {
+		return Config{}, err
+	}
+	queryProgress, err := positiveDuration("QUERY_PROGRESS_INTERVAL", "800ms")
+	if err != nil {
+		return Config{}, err
+	}
+	syncTimeout, err := positiveDuration("SYNC_TIMEOUT", "10m")
+	if err != nil {
+		return Config{}, err
+	}
+	preflightInterval, err := positiveDuration("PREFLIGHT_INTERVAL", "5m")
+	if err != nil {
+		return Config{}, err
+	}
+	queueLimit, err := strconv.Atoi(getenv("MUTATION_QUEUE_LIMIT", "500"))
+	if err != nil || queueLimit <= 0 {
+		return Config{}, fmt.Errorf("MUTATION_QUEUE_LIMIT must be a positive integer")
+	}
 	return Config{
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"), Allowlist: allow,
 		RuleRepoProvider: provider, RuleRepoProject: getenv("RULE_REPO_PROJECT", legacyRepo), RuleRepoBranch: getenv("RULE_REPO_BRANCH", legacyBranch),
@@ -96,7 +131,18 @@ func Load() (Config, error) {
 		DomesticDNSEnabled: domesticEnabled, DomesticDNSURLs: domesticURLs, ForeignDNSEnabled: foreignEnabled, ForeignDNSURLs: foreignURLs,
 		DNSTimeout: dnsTimeout, DNSCacheSize: dnsCacheSize,
 		SyncUpstream: getenvBool("SYNC_UPSTREAM", false), UpstreamIndex: getenvBool("UPSTREAM_INDEX_ENABLED", true), Location: loc,
+		StoreRefreshInterval: storeRefresh, MutationRetryInterval: mutationRetry, MutationQueueLimit: queueLimit,
+		QueryTimeout: queryTimeout, QueryProgressInterval: queryProgress, SyncTimeout: syncTimeout, PreflightInterval: preflightInterval,
 	}, nil
+}
+
+func positiveDuration(key, fallback string) (time.Duration, error) {
+	value := getenv(key, fallback)
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid %s %q", key, value)
+	}
+	return d, nil
 }
 
 func splitURLs(value string) []string {

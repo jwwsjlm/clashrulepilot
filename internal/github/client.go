@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"clashrulepilot/internal/repository"
 	gh "github.com/google/go-github/v81/github"
 	"github.com/hashicorp/go-retryablehttp"
 )
@@ -23,7 +24,11 @@ func New(token, project, branch string) *Client {
 	retry.RetryWaitMin = 500 * time.Millisecond
 	retry.RetryWaitMax = 5 * time.Second
 	retry.Logger = nil
-	c := &Client{repo: project, branch: branch, api: gh.NewClient(retry.StandardClient()).WithAuthToken(token)}
+	api := gh.NewClient(retry.StandardClient())
+	if strings.TrimSpace(token) != "" {
+		api = api.WithAuthToken(token)
+	}
+	c := &Client{repo: project, branch: branch, api: api}
 	if parts := strings.SplitN(project, "/", 2); len(parts) == 2 {
 		c.owner, c.repo = parts[0], parts[1]
 	}
@@ -36,6 +41,66 @@ func (c *Client) Branch() string { return c.branch }
 func (c *Client) WebURL() string { return fmt.Sprintf("https://github.com/%s/%s", c.owner, c.repo) }
 func (c *Client) RawURL(file string) string {
 	return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", c.owner, c.repo, c.branch, strings.TrimLeft(file, "/"))
+}
+
+func (c *Client) CheckAccess(ctx context.Context) repository.AccessReport {
+	report := repository.AccessReport{Provider: "github", Branch: c.branch, CheckedAt: time.Now().UTC()}
+	user, _, authErr := c.api.Users.Get(ctx, "")
+	if authErr == nil {
+		report.Authenticated = true
+		report.User = user.GetLogin()
+		if c.owner == "" {
+			c.owner = report.User
+		}
+	} else {
+		report.Error = "GitHub Token 认证失败：" + authErr.Error()
+		report.Transient = githubTransient(authErr)
+	}
+	if c.owner == "" {
+		return report
+	}
+	r, _, err := c.api.Repositories.Get(ctx, c.owner, c.repo)
+	if err != nil {
+		if report.Error == "" {
+			report.Error = err.Error()
+		}
+		report.Transient = githubTransient(err)
+		return report
+	}
+	report.Readable = true
+	report.Writable = r.GetPermissions()["push"]
+	report.Public = !r.GetPrivate()
+	if !report.Authenticated {
+		report.Writable = false
+	}
+	if c.branch == "" {
+		c.branch = r.GetDefaultBranch()
+	}
+	if c.branch == "" {
+		c.branch = "main"
+	}
+	report.Branch = c.branch
+	if revision, headErr := c.HeadRevision(ctx); headErr == nil {
+		report.Revision = revision
+	} else if !isStatus(headErr, http.StatusNotFound) {
+		report.Error = headErr.Error()
+	}
+	return report
+}
+
+func githubTransient(err error) bool {
+	if response, ok := err.(*gh.ErrorResponse); ok && response.Response != nil {
+		return response.Response.StatusCode >= 500 || response.Response.StatusCode == http.StatusTooManyRequests
+	}
+	return true
+}
+
+func (c *Client) HeadRevision(ctx context.Context) (string, error) {
+	ref, _, err := c.api.Git.GetRef(ctx, c.owner, c.repo, "heads/"+c.branch)
+	if err != nil {
+		return "", err
+	}
+	return ref.GetObject().GetSHA(), nil
 }
 
 func (c *Client) EnsureRepo(ctx context.Context) error {
@@ -78,7 +143,14 @@ func (c *Client) EnsureRepo(ctx context.Context) error {
 }
 
 func (c *Client) GetFile(ctx context.Context, file string) ([]byte, string, error) {
-	content, _, _, err := c.api.Repositories.GetContents(ctx, c.owner, c.repo, strings.TrimLeft(file, "/"), &gh.RepositoryContentGetOptions{Ref: c.branch})
+	return c.GetFileAtRevision(ctx, file, c.branch)
+}
+
+func (c *Client) GetFileAtRevision(ctx context.Context, file, revision string) ([]byte, string, error) {
+	if strings.TrimSpace(revision) == "" {
+		revision = c.branch
+	}
+	content, _, _, err := c.api.Repositories.GetContents(ctx, c.owner, c.repo, strings.TrimLeft(file, "/"), &gh.RepositoryContentGetOptions{Ref: revision})
 	if err != nil {
 		if isStatus(err, http.StatusNotFound) {
 			return nil, "", nil
@@ -95,7 +167,11 @@ func (c *Client) GetFile(ctx context.Context, file string) ([]byte, string, erro
 	return []byte(data), content.GetSHA(), nil
 }
 
-func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, message string) (string, error) {
+func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, message string, expectedRevisions ...string) (string, error) {
+	expectedRevision := ""
+	if len(expectedRevisions) > 0 {
+		expectedRevision = expectedRevisions[0]
+	}
 	if len(files) == 0 {
 		return "", nil
 	}
@@ -103,6 +179,9 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 	baseCommitSHA, baseTreeSHA := "", ""
 	if err == nil {
 		baseCommitSHA = ref.GetObject().GetSHA()
+		if expectedRevision != "" && baseCommitSHA != expectedRevision {
+			return "", repository.ErrConflict
+		}
 		commit, _, err := c.api.Git.GetCommit(ctx, c.owner, c.repo, baseCommitSHA)
 		if err != nil {
 			return "", err
@@ -139,7 +218,10 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 		_, _, err = c.api.Git.UpdateRef(ctx, c.owner, c.repo, "heads/"+c.branch, gh.UpdateRef{SHA: created.GetSHA(), Force: gh.Ptr(false)})
 	}
 	if err != nil {
-		return "", fmt.Errorf("update branch (another commit may have won the race): %w", err)
+		if isStatus(err, http.StatusConflict) || isStatus(err, http.StatusUnprocessableEntity) {
+			return "", fmt.Errorf("%w: update branch: %v", repository.ErrConflict, err)
+		}
+		return "", fmt.Errorf("update branch: %w", err)
 	}
 	return created.GetSHA(), nil
 }

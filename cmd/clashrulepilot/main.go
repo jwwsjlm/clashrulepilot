@@ -47,11 +47,17 @@ func main() {
 	defer service.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Printf("github bootstrap started")
+	log.Printf("%s bootstrap started", cfg.RuleRepoProvider)
 	if err := service.Bootstrap(ctx); err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("github bootstrap complete; service ready")
+	access := service.AccessStatus()
+	mode := "read-write"
+	if !access.Writable {
+		mode = "read-only"
+	}
+	log.Printf("%s preflight authenticated=%t user=%s readable=%t writable=%t public=%t raw_accessible=%t mode=%s error=%q", cfg.RuleRepoProvider, access.Authenticated, access.User, access.Readable, access.Writable, access.Public, access.RawAccessible, mode, access.Error)
+	log.Printf("%s bootstrap complete; service ready", cfg.RuleRepoProvider)
 	if cfg.TelegramToken == "" {
 		log.Printf("Telegram disabled: TELEGRAM_BOT_TOKEN is empty")
 	} else {
@@ -62,11 +68,12 @@ func main() {
 		log.Printf("starting Telegram polling")
 		go b.Run(ctx)
 	}
+	service.StartWorkers(ctx)
 
 	c := cron.New(cron.WithLocation(cfg.Location))
 	if service.SyncEnabled() || service.IndexEnabled() {
 		if _, err := c.AddFunc(cfg.SyncCron, func() {
-			if result, err := service.Sync(context.Background()); err != nil {
+			if result, err := service.SyncWithSource(ctx, "cron"); err != nil {
 				log.Printf("scheduled sync failed: %v", err)
 			} else {
 				log.Printf("scheduled sync complete index_changed=%t commit=%s", result.IndexChanged, result.Commit)
@@ -80,7 +87,7 @@ func main() {
 	if service.SyncEnabled() || service.IndexEnabled() {
 		go func() {
 			log.Printf("initial upstream index sync started in background")
-			if result, err := service.Sync(ctx); err != nil {
+			if result, err := service.SyncWithSource(ctx, "startup"); err != nil {
 				log.Printf("initial upstream sync failed: %v", err)
 			} else if result.Commit != "" {
 				log.Printf("initial upstream sync committed %s", result.Commit)

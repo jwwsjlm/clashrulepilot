@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadLegacyGitHubVariables(t *testing.T) {
 	t.Setenv("RULE_REPO_PROVIDER", "")
@@ -73,5 +76,18 @@ func TestLoadGitLab(t *testing.T) {
 	}
 	if cfg.GitLabBaseURL != "https://gitlab.example.com" || cfg.RuleRepoProject != "group/rules" {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestLoadRuntimeStabilityDefaults(t *testing.T) {
+	for _, key := range []string{"STORE_REFRESH_INTERVAL", "MUTATION_RETRY_INTERVAL", "MUTATION_QUEUE_LIMIT", "QUERY_TIMEOUT", "QUERY_PROGRESS_INTERVAL", "SYNC_TIMEOUT", "PREFLIGHT_INTERVAL"} {
+		t.Setenv(key, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StoreRefreshInterval != 5*time.Minute || cfg.MutationRetryInterval != time.Minute || cfg.MutationQueueLimit != 500 || cfg.QueryTimeout != 15*time.Second || cfg.QueryProgressInterval != 800*time.Millisecond || cfg.SyncTimeout != 10*time.Minute || cfg.PreflightInterval != 5*time.Minute {
+		t.Fatalf("unexpected runtime stability defaults: %+v", cfg)
 	}
 }

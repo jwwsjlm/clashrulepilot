@@ -14,17 +14,19 @@ import (
 	"clashrulepilot/internal/domain"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/jwwsjlm/req/v3"
+	"golang.org/x/sync/singleflight"
 )
 
 type DoHConfig struct {
 	// Enabled/Endpoints are retained for backwards compatibility with the
 	// original single DoH configuration and older tests.
-	Enabled   bool
-	Endpoints []string
-	Domestic  DNSGroupConfig
-	Foreign   DNSGroupConfig
-	Timeout   time.Duration
-	CacheSize int
+	Enabled      bool
+	Endpoints    []string
+	Domestic     DNSGroupConfig
+	Foreign      DNSGroupConfig
+	Timeout      time.Duration
+	CacheSize    int
+	QueryTimeout time.Duration
 }
 
 type DNSGroupConfig struct {
@@ -41,6 +43,7 @@ type DNSGroupResult struct {
 	AAAA       []string
 	CacheHit   bool
 	Error      string
+	Duration   time.Duration
 }
 
 type Report struct {
@@ -59,7 +62,11 @@ type Report struct {
 	GeoIPs            []GeoIPInfo
 	Domestic          DNSGroupResult
 	Foreign           DNSGroupResult
+	Timing            Timing
+	Shared            bool
 }
+
+type Timing struct{ Local, Domestic, Foreign, GeoIP, Total time.Duration }
 
 // GeoIPInfo is the per-address result returned by the configured GeoIP API.
 // Keeping the address alongside the response prevents the UI from showing an
@@ -101,6 +108,7 @@ type dohCacheEntry struct {
 type Inspector struct {
 	apiURL   string
 	resolver *net.Resolver
+	lookupIP func(context.Context, string) ([]net.IPAddr, error)
 	http     *req.Client
 	doh      DoHConfig
 	dohCache *lru.Cache[string, dohCacheEntry]
@@ -108,6 +116,7 @@ type Inspector struct {
 	geoCache map[string]geoCacheEntry
 	status   Status
 	legacy   bool
+	group    singleflight.Group
 }
 
 func New(apiURL string, doh DoHConfig) *Inspector {
@@ -117,6 +126,9 @@ func New(apiURL string, doh DoHConfig) *Inspector {
 	}
 	if doh.CacheSize <= 0 {
 		doh.CacheSize = 2048
+	}
+	if doh.QueryTimeout <= 0 {
+		doh.QueryTimeout = 15 * time.Second
 	}
 	// A caller using the legacy single-group fields keeps the old behaviour.
 	// Production configuration supplies Domestic/Foreign explicitly.
@@ -130,25 +142,52 @@ func New(apiURL string, doh DoHConfig) *Inspector {
 		SetCommonRetryCount(2).
 		SetCommonRetryBackoffInterval(250*time.Millisecond, 1500*time.Millisecond)
 	enabled := doh.Enabled || doh.Domestic.Enabled || doh.Foreign.Enabled
-	return &Inspector{
+	inspector := &Inspector{
 		apiURL: apiURL, resolver: net.DefaultResolver, http: httpClient, doh: doh,
 		dohCache: cache, geoCache: map[string]geoCacheEntry{}, status: Status{Enabled: enabled, Domestic: doh.Domestic.Enabled, Foreign: doh.Foreign.Enabled}, legacy: legacy,
 	}
+	inspector.lookupIP = inspector.resolver.LookupIPAddr
+	return inspector
 }
 
 func (i *Inspector) Inspect(ctx context.Context, name string) Report {
+	key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	ch := i.group.DoChan(key, func() (any, error) {
+		jobCtx, cancel := context.WithTimeout(context.Background(), i.doh.QueryTimeout)
+		defer cancel()
+		return i.inspect(jobCtx, key), nil
+	})
+	select {
+	case <-ctx.Done():
+		return Report{Registrable: domain.Registrable(name), DNSError: ctx.Err().Error()}
+	case result := <-ch:
+		report := cloneReport(result.Val.(Report))
+		report.Shared = result.Shared
+		return report
+	}
+}
+
+func (i *Inspector) inspect(ctx context.Context, name string) Report {
+	started := time.Now()
 	r := Report{Registrable: domain.Registrable(name)}
+	localStarted := time.Now()
 	lookupCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	addrs, err := i.resolver.LookupIPAddr(lookupCtx, name)
+	resolver := i.lookupIP
+	if resolver == nil {
+		resolver = i.resolver.LookupIPAddr
+	}
+	addrs, err := resolver(lookupCtx, name)
 	cancel()
 	if err != nil {
 		r.DNSError = err.Error()
 	} else {
 		i.classifyLocal(&r, addrs)
 	}
+	r.Timing.Local = time.Since(localStarted)
 
 	if i.hasGroups() {
 		r.Domestic, r.Foreign = i.resolveGroups(ctx, name)
+		r.Timing.Domestic, r.Timing.Foreign = r.Domestic.Duration, r.Foreign.Duration
 		r.A, r.AAAA = nil, nil
 		i.mergeGroupAddresses(&r)
 		if len(r.A)+len(r.AAAA) > 0 {
@@ -180,7 +219,10 @@ func (i *Inspector) Inspect(ctx context.Context, name string) Report {
 		}
 	}
 
+	geoStarted := time.Now()
 	i.inspectGeoIP(ctx, &r)
+	r.Timing.GeoIP = time.Since(geoStarted)
+	r.Timing.Total = time.Since(started)
 	return r
 }
 
@@ -245,7 +287,9 @@ func (i *Inspector) resolveGroups(ctx context.Context, name string) (DNSGroupRes
 }
 
 func (i *Inspector) resolveGroup(ctx context.Context, name, group string, cfg DNSGroupConfig) DNSGroupResult {
+	started := time.Now()
 	result := DNSGroupResult{Group: group}
+	defer func() { result.Duration = time.Since(started) }()
 	if !cfg.Enabled || len(cfg.Endpoints) == 0 {
 		result.Error = "未启用"
 		return result
@@ -313,6 +357,21 @@ func (i *Inspector) resolveGroup(ctx context.Context, name, group string, cfg DN
 		result.Error = "主备端点均未返回有效 A/AAAA"
 	}
 	return result
+}
+
+func cloneReport(in Report) Report {
+	out := in
+	out.LocalA = append([]string(nil), in.LocalA...)
+	out.LocalAAAA = append([]string(nil), in.LocalAAAA...)
+	out.A = append([]string(nil), in.A...)
+	out.AAAA = append([]string(nil), in.AAAA...)
+	out.FakeIP = append([]string(nil), in.FakeIP...)
+	out.GeoIPs = append([]GeoIPInfo(nil), in.GeoIPs...)
+	out.Domestic.A = append([]string(nil), in.Domestic.A...)
+	out.Domestic.AAAA = append([]string(nil), in.Domestic.AAAA...)
+	out.Foreign.A = append([]string(nil), in.Foreign.A...)
+	out.Foreign.AAAA = append([]string(nil), in.Foreign.AAAA...)
+	return out
 }
 
 func providerNameForGroup(group string) string {

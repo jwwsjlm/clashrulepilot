@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"clashrulepilot/internal/repository"
 	"github.com/hashicorp/go-retryablehttp"
 	gl "gitlab.com/gitlab-org/api/client-go"
 )
@@ -73,6 +74,63 @@ func (c *Client) RawURL(file string) string {
 	return fmt.Sprintf("%s/%s/-/raw/%s/%s", c.webBase, c.project, c.branch, strings.TrimLeft(file, "/"))
 }
 
+func (c *Client) CheckAccess(ctx context.Context) repository.AccessReport {
+	report := repository.AccessReport{Provider: "gitlab", Branch: c.branch, CheckedAt: time.Now().UTC()}
+	user, resp, authErr := c.api.Users.CurrentUser(gl.WithContext(ctx))
+	if authErr == nil {
+		report.Authenticated = true
+		report.User = user.Username
+	} else {
+		report.Error = "GitLab Token 认证失败：" + authErr.Error()
+		report.Transient = resp == nil || resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests
+	}
+	project, resp, err := c.api.Projects.GetProject(c.project, nil, gl.WithContext(ctx))
+	if err != nil {
+		if report.Error == "" {
+			report.Error = err.Error()
+		}
+		report.Transient = resp == nil || resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests
+		return report
+	}
+	c.applyProject(project)
+	report.Readable = true
+	report.Public = project.Visibility == gl.PublicVisibility
+	level := gl.NoPermissions
+	if project.Permissions != nil {
+		if project.Permissions.ProjectAccess != nil && project.Permissions.ProjectAccess.AccessLevel > level {
+			level = project.Permissions.ProjectAccess.AccessLevel
+		}
+		if project.Permissions.GroupAccess != nil && project.Permissions.GroupAccess.AccessLevel > level {
+			level = project.Permissions.GroupAccess.AccessLevel
+		}
+	}
+	report.Writable = level >= gl.DeveloperPermissions
+	if report.Authenticated && project.Owner != nil && project.Owner.ID == user.ID {
+		report.Writable = true
+	}
+	if !report.Authenticated {
+		report.Writable = false
+	}
+	report.Branch = c.branch
+	if revision, headErr := c.HeadRevision(ctx); headErr == nil {
+		report.Revision = revision
+	} else {
+		report.Error = headErr.Error()
+	}
+	return report
+}
+
+func (c *Client) HeadRevision(ctx context.Context) (string, error) {
+	branch, _, err := c.api.Branches.GetBranch(c.project, c.branch, gl.WithContext(ctx))
+	if err != nil {
+		return "", err
+	}
+	if branch.Commit == nil {
+		return "", fmt.Errorf("branch %s has no commit", c.branch)
+	}
+	return branch.Commit.ID, nil
+}
+
 func (c *Client) EnsureRepo(ctx context.Context) error {
 	project, resp, err := c.api.Projects.GetProject(c.project, nil, gl.WithContext(ctx))
 	if err == nil {
@@ -128,7 +186,14 @@ func (c *Client) checkBranch(ctx context.Context) {
 }
 
 func (c *Client) GetFile(ctx context.Context, file string) ([]byte, string, error) {
-	result, resp, err := c.api.RepositoryFiles.GetFile(c.project, strings.TrimLeft(file, "/"), &gl.GetFileOptions{Ref: gl.Ptr(c.branch)}, gl.WithContext(ctx))
+	return c.GetFileAtRevision(ctx, file, c.branch)
+}
+
+func (c *Client) GetFileAtRevision(ctx context.Context, file, revision string) ([]byte, string, error) {
+	if strings.TrimSpace(revision) == "" {
+		revision = c.branch
+	}
+	result, resp, err := c.api.RepositoryFiles.GetFile(c.project, strings.TrimLeft(file, "/"), &gl.GetFileOptions{Ref: gl.Ptr(revision)}, gl.WithContext(ctx))
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return nil, "", nil
@@ -142,7 +207,20 @@ func (c *Client) GetFile(ctx context.Context, file string) ([]byte, string, erro
 	return b, result.LastCommitID, nil
 }
 
-func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, message string) (string, error) {
+func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, message string, expectedRevisions ...string) (string, error) {
+	expectedRevision := ""
+	if len(expectedRevisions) > 0 {
+		expectedRevision = expectedRevisions[0]
+	}
+	if expectedRevision != "" {
+		head, err := c.HeadRevision(ctx)
+		if err != nil {
+			return "", err
+		}
+		if head != expectedRevision {
+			return "", repository.ErrConflict
+		}
+	}
 	actions := make([]*gl.CommitActionOptions, 0, len(files))
 	for file, content := range files {
 		_, lastCommit, err := c.GetFile(ctx, file)
@@ -166,6 +244,9 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 	}
 	commit, _, err := c.api.Commits.CreateCommit(c.project, opt, gl.WithContext(ctx))
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "last_commit_id") || strings.Contains(strings.ToLower(err.Error()), "conflict") {
+			return "", fmt.Errorf("%w: %v", repository.ErrConflict, err)
+		}
 		return "", fmt.Errorf("GitLab atomic commit: %w", err)
 	}
 	c.needsBranch = false

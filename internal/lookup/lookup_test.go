@@ -18,6 +18,34 @@ func TestFirstString(t *testing.T) {
 	}
 }
 
+func TestInspectCoalescesConcurrentDomainLookups(t *testing.T) {
+	inspector := New("", DoHConfig{QueryTimeout: 2 * time.Second})
+	var calls atomic.Int32
+	inspector.lookupIP = func(context.Context, string) ([]net.IPAddr, error) {
+		calls.Add(1)
+		time.Sleep(80 * time.Millisecond)
+		return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+	}
+	start := make(chan struct{})
+	results := make(chan Report, 12)
+	for range 12 {
+		go func() { <-start; results <- inspector.Inspect(context.Background(), "EXAMPLE.com.") }()
+	}
+	close(start)
+	shared := 0
+	for range 12 {
+		if (<-results).Shared {
+			shared++
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected one shared lookup, got %d", calls.Load())
+	}
+	if shared == 0 {
+		t.Fatal("expected shared results to be marked")
+	}
+}
+
 func TestIsChinaWithReq(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/1.2.3.4" {

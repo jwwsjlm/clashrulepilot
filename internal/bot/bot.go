@@ -34,6 +34,7 @@ type Bot struct {
 	seenCallbacks map[string]time.Time
 	chatLocks     sync.Map
 	mu            sync.Mutex
+	meUsername    string
 }
 
 type pageSnapshot struct {
@@ -60,6 +61,7 @@ type pending struct {
 	ActiveMessageID int
 	CurrentPage     *pageSnapshot
 	PageStack       []pageSnapshot
+	QueueID         string
 }
 
 type button struct {
@@ -88,6 +90,7 @@ func New(service *app.Service, cfg config.Config) (*Bot, error) {
 		return nil, err
 	}
 	b.api = api
+	service.SetNotifier(b.Notify)
 	return b, nil
 }
 
@@ -97,8 +100,15 @@ func (b *Bot) Run(ctx context.Context) {
 		log.Printf("telegram startup check failed: %v", err)
 		return
 	}
+	b.mu.Lock()
+	b.meUsername = me.Username
+	b.mu.Unlock()
 	log.Printf("telegram connected bot=@%s id=%d allowlist=%v", me.Username, me.ID, b.cfg.Allowlist)
 	b.api.Start(ctx)
+}
+
+func (b *Bot) Notify(chatID int64, message string) {
+	go b.send(context.Background(), chatID, message, homeMenu())
 }
 
 func (b *Bot) allowed(id int64, private bool) bool { return private && b.cfg.Allowlist[id] }
@@ -340,6 +350,10 @@ func (b *Bot) showAdvancedConfirmationTarget(ctx context.Context, chatID int64, 
 }
 
 func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pending, force bool) {
+	if b.service.ReadOnly() {
+		b.send(ctx, chatID, "🔒 当前仓库处于只读模式，请在运行状态中检查 Token 权限。", homeMenu())
+		return
+	}
 	if !b.markBusy(chatID) {
 		b.send(ctx, chatID, "⏳ 当前规则正在处理中，请勿重复点击。", homeMenu())
 		return
@@ -366,6 +380,10 @@ func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pendin
 		b.sendTarget(ctx, chatID, progress, "提交失败："+message, homeMenu())
 		return
 	}
+	if result.Queued {
+		b.sendTarget(ctx, chatID, progress, fmt.Sprintf("📤 仓库暂时不可用，操作已安全加入待提交队列。\n\n规则：%s\n队列编号：%s\n\n该规则尚未在 OpenClash 生效，仓库恢复后会自动重试。", rules.Token(toRule(p, userID)), short(result.QueueID)), homeMenu())
+		return
+	}
 	var extra string
 	if len(result.Related) > 0 {
 		extra = fmt.Sprintf("\n\n⚠️ 已保留 %d 条相反动作的父子/重叠规则。生成的显式规则会按精确度排序，更具体的规则优先。", len(result.Related))
@@ -378,6 +396,10 @@ func (b *Bot) startAddMode(ctx context.Context, chatID int64, action rules.Actio
 }
 
 func (b *Bot) startAddModeTarget(ctx context.Context, chatID int64, action rules.Action, target *models.Message) {
+	if b.service.ReadOnly() {
+		b.sendTarget(ctx, chatID, target, "🔒 当前仓库处于只读模式，暂时不能添加或移动规则。", homeEditMenu())
+		return
+	}
 	b.replaceSession(chatID, &pending{Mode: "add", Action: action})
 	actionText := "直连"
 	if action == rules.Proxy {
@@ -405,6 +427,10 @@ func (b *Bot) startRemoveModeTarget(ctx context.Context, chatID int64, target *m
 }
 
 func (b *Bot) addStart(ctx context.Context, chatID int64, parts []string) {
+	if b.service.ReadOnly() {
+		b.send(ctx, chatID, "🔒 当前仓库处于只读模式，暂时不能添加规则。", homeMenu())
+		return
+	}
 	if len(parts) < 2 {
 		b.send(ctx, chatID, "用法：/add example.com", homeMenu())
 		return
@@ -465,6 +491,12 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 		b.resetViewSession(chatID, query.From.ID)
 		b.statusTarget(ctx, chatID, message)
 		return
+	case "status:selfcheck":
+		b.selfCheckTarget(ctx, chatID, message)
+		return
+	case "queue:list":
+		b.queueTarget(ctx, chatID, message, 0)
+		return
 	case "menu:repo":
 		b.resetViewSession(chatID, query.From.ID)
 		b.repoTarget(ctx, chatID, message)
@@ -487,6 +519,42 @@ func (b *Bot) handleCallback(ctx context.Context, query *models.CallbackQuery) {
 	case "nav:cancel", "cancel", "confirm:no":
 		b.clear(chatID)
 		b.sendTarget(ctx, chatID, message, b.welcomeText(), mainMenu())
+		return
+	}
+	if strings.HasPrefix(query.Data, "queue:page:") {
+		var page int
+		if _, err := fmt.Sscanf(query.Data, "queue:page:%d", &page); err == nil {
+			b.queueTarget(ctx, chatID, message, page)
+			return
+		}
+	}
+	if strings.HasPrefix(query.Data, "queue:cancel:") {
+		id := strings.TrimPrefix(query.Data, "queue:cancel:")
+		b.replaceSession(chatID, &pending{Mode: "queue_cancel", QueueID: id, UserID: query.From.ID})
+		b.sendTarget(ctx, chatID, message, "⚠️ 确认取消待提交操作？\n\n队列编号："+short(id)+"\n取消后该操作不会提交到规则仓库。", keyboard([][]button{{{Text: "🗑️ 确认取消", Data: "queue:confirm:" + id}, {Text: "↩️ 返回", Data: "queue:list"}}}))
+		return
+	}
+	if strings.HasPrefix(query.Data, "queue:confirm:") {
+		id := strings.TrimPrefix(query.Data, "queue:confirm:")
+		if err := b.service.CancelQueued(id, query.From.ID); err != nil {
+			b.sendTarget(ctx, chatID, message, "取消队列操作失败："+err.Error(), errorMenu())
+		} else {
+			b.queueTarget(ctx, chatID, message, 0)
+		}
+		return
+	}
+	if strings.HasPrefix(query.Data, "queue:force:") {
+		id := strings.TrimPrefix(query.Data, "queue:force:")
+		b.sendTarget(ctx, chatID, message, "⚠️ 确认按排队时的目标分组覆盖远端最新规则？\n\n队列编号："+short(id)+"\n确认后会在仓库恢复可写时重新提交。", keyboard([][]button{{{Text: "🔄 确认重新提交", Data: "queue:force-confirm:" + id}, {Text: "↩️ 返回", Data: "queue:list"}}}))
+		return
+	}
+	if strings.HasPrefix(query.Data, "queue:force-confirm:") {
+		id := strings.TrimPrefix(query.Data, "queue:force-confirm:")
+		if err := b.service.ResumeQueued(id, true, query.From.ID); err != nil {
+			b.sendTarget(ctx, chatID, message, "恢复队列操作失败："+err.Error(), errorMenu())
+		} else {
+			b.queueTarget(ctx, chatID, message, 0)
+		}
 		return
 	}
 	if strings.HasPrefix(query.Data, "dns:details:") {
@@ -659,6 +727,10 @@ func (b *Bot) remove(ctx context.Context, chatID int64, parts []string) {
 }
 
 func (b *Bot) removeDomain(ctx context.Context, chatID int64, domainName string) {
+	if b.service.ReadOnly() {
+		b.send(ctx, chatID, "🔒 当前仓库处于只读模式，暂时不能删除规则。", homeMenu())
+		return
+	}
 	store, err := b.service.LoadStore(ctx)
 	if err != nil {
 		b.clear(chatID)
@@ -707,10 +779,14 @@ func (b *Bot) confirmRemoval(ctx context.Context, chatID int64, p *pending) {
 		return
 	}
 	progress := b.sendProgress(ctx, chatID, fmt.Sprintf("⏳ 已确认删除 %d 条规则，正在提交到%s，请稍候……", len(current), repoProviderText(b.cfg.RuleRepoProvider)))
-	result, err := b.service.RemoveRule(ctx, p.Domain, nil)
+	result, err := b.service.RemoveRule(ctx, p.Domain, nil, p.UserID)
 	b.clear(chatID)
 	if err != nil {
 		b.sendTarget(ctx, chatID, progress, "删除失败："+err.Error(), homeMenu())
+		return
+	}
+	if result.Queued {
+		b.sendTarget(ctx, chatID, progress, fmt.Sprintf("📤 仓库暂时不可用，删除操作已加入待提交队列。\n队列编号：%s\n\n规则尚未从 OpenClash 生效文件中删除。", short(result.QueueID)), homeMenu())
 		return
 	}
 	b.sendTarget(ctx, chatID, progress, fmt.Sprintf("✅ 删除完成\n域名：%s\n删除规则：%d 条\ncommit：%s", p.Domain, result.Changed, short(result.Commit)), homeMenu())
@@ -756,7 +832,24 @@ func (b *Bot) query(ctx context.Context, chatID int64, domainName string) {
 
 func (b *Bot) queryTarget(ctx context.Context, chatID int64, domainName string, target *models.Message) {
 	target = b.sendTargetModeEntities(ctx, chatID, target, "⏳ 正在查询："+domainName+"\n正在检查个人规则、上游规则、DNS 与 IP 归属，请稍候……", nil, nil, false)
-	result, err := b.service.Query(ctx, domainName)
+	var progressMu sync.Mutex
+	progressState := app.QueryProgress{Stage: "start"}
+	progressFinished := make(chan struct{})
+	timer := time.AfterFunc(b.cfg.QueryProgressInterval, func() {
+		defer close(progressFinished)
+		progressMu.Lock()
+		state := progressState
+		progressMu.Unlock()
+		b.sendTargetModeEntities(ctx, chatID, target, queryProgressText(domainName, state), nil, nil, false)
+	})
+	result, err := b.service.QueryWithProgress(ctx, domainName, func(update app.QueryProgress) {
+		progressMu.Lock()
+		progressState = update
+		progressMu.Unlock()
+	})
+	if !timer.Stop() {
+		<-progressFinished
+	}
 	if err != nil {
 		b.sendTargetModeEntities(ctx, chatID, target, "查询失败："+err.Error(), errorMenu(), nil, target == nil)
 		return
@@ -834,8 +927,15 @@ func (b *Bot) queryTarget(ctx context.Context, chatID int64, domainName string, 
 	if suggestionDecision.Text != "" {
 		text += "\n" + suggestionDecision.Text
 	}
+	text += fmt.Sprintf("\n\n⏱ 查询耗时：%s\n👤 个人 %s · 📚 上游 %s · 🏠 本地 DNS %s\n🇨🇳 国内 DNS %s · 🌍 国外 DNS %s · 📍 GeoIP %s",
+		formatDuration(result.Timing.Total), formatDuration(result.Timing.Personal), formatDuration(result.Timing.Upstream), formatDuration(result.Timing.LocalDNS),
+		formatDuration(result.Timing.DomesticDNS), formatDuration(result.Timing.ForeignDNS), formatDuration(result.Timing.GeoIP))
+	if result.Timing.Shared {
+		text += " · 🔗 已复用相同域名查询"
+	}
 	rows := [][]button{}
-	if len(result.Personal) == 0 {
+	canWrite := !b.service.ReadOnly()
+	if canWrite && len(result.Personal) == 0 {
 		if hasProxy {
 			rows = append(rows, []button{{Text: "🟢 覆写为个人直连", Data: "override:direct"}})
 		}
@@ -853,22 +953,61 @@ func (b *Bot) queryTarget(ctx context.Context, chatID int64, domainName string, 
 	if len(result.Network.Foreign.A)+len(result.Network.Foreign.AAAA) > 0 {
 		rows = append(rows, []button{{Text: "🌍 查看国外 DNS 详情", Data: "dns:details:foreign"}})
 	}
-	if suggestionDecision.ButtonAction != "" {
+	if canWrite && suggestionDecision.ButtonAction != "" {
 		upstreamAlreadyHasAction := len(result.Personal) == 0 && ((suggestionDecision.ButtonAction == rules.Direct && hasDirect) || (suggestionDecision.ButtonAction == rules.Proxy && hasProxy))
 		if !upstreamAlreadyHasAction {
 			rows = append(rows, []button{{Text: suggestionDecision.ButtonText, Data: "suggest:" + string(suggestionDecision.ButtonAction)}})
 		}
-	} else if len(result.Personal) == 0 && suggestionDecision.Kind == "both" {
+	} else if canWrite && len(result.Personal) == 0 && suggestionDecision.Kind == "both" {
 		rows = append(rows, []button{
 			{Text: "🟢 添加直连（需确认）", Data: "suggest:direct"},
 			{Text: "🔴 添加代理（需确认）", Data: "suggest:proxy"},
 		})
 	}
-	if len(result.Personal) > 0 {
+	if canWrite && len(result.Personal) > 0 {
 		rows = append(rows, []button{{Text: "🗑️ 删除匹配的个人规则", Data: "query:remove"}})
 	}
 	b.setQuerySession(chatID, domainName, &result)
 	b.sendTargetModeEntities(ctx, chatID, target, text, keyboard(rows), entities, target == nil)
+}
+
+func queryProgressText(domainName string, progress app.QueryProgress) string {
+	t := progress.Timing
+	personal := "🔄 查询中"
+	upstream := "⏸ 等待"
+	localDNS := "⏸ 等待"
+	domesticDNS := "⏸ 等待"
+	foreignDNS := "⏸ 等待"
+	geoIP := "⏸ 等待 DNS"
+	if progress.Stage != "start" {
+		personal = "✅ 完成 · " + formatDuration(t.Personal)
+	}
+	if progress.Stage == "upstream" || progress.Stage == "network" || progress.Stage == "complete" {
+		upstream = "✅ 完成 · " + formatDuration(t.Upstream)
+	}
+	if progress.Stage == "network" {
+		localDNS = "🔄 查询中"
+		domesticDNS = "🔄 查询中"
+		foreignDNS = "🔄 查询中"
+		geoIP = "⏸ 等待 DNS"
+	}
+	if progress.Stage == "complete" {
+		localDNS = "✅ 完成 · " + formatDuration(t.LocalDNS)
+		domesticDNS = "✅ 完成 · " + formatDuration(t.DomesticDNS)
+		foreignDNS = "✅ 完成 · " + formatDuration(t.ForeignDNS)
+		geoIP = "✅ 完成 · " + formatDuration(t.GeoIP)
+	}
+	return fmt.Sprintf("⏳ 正在查询：%s\n\n👤 个人规则：%s\n📚 Aethersailor/GEOSITE：%s\n🏠 本地 DNS：%s\n🇨🇳 国内 DNS：%s\n🌍 国外 DNS：%s\n📍 GeoIP：%s\n\n已用时：%s", domainName, personal, upstream, localDNS, domesticDNS, foreignDNS, geoIP, formatDuration(t.Total))
+}
+
+func formatDuration(value time.Duration) string {
+	if value < time.Millisecond {
+		return "<1ms"
+	}
+	if value < time.Second {
+		return fmt.Sprintf("%dms", value.Milliseconds())
+	}
+	return fmt.Sprintf("%.1fs", value.Seconds())
 }
 
 func whoisEntities(text, domainName, registrable string) []models.MessageEntity {
@@ -987,10 +1126,10 @@ func (b *Bot) sync(ctx context.Context, chatID int64) {
 		b.send(ctx, chatID, "本地查询索引和上游镜像都已关闭。", homeMenu())
 		return
 	}
-	b.send(ctx, chatID, "正在同步 Aethersailor、GEOSITE:CN 与 GEOSITE:GFW 本地索引，请稍候…", nil)
-	result, err := b.service.Sync(ctx)
+	progress := b.sendProgress(ctx, chatID, "🔄 正在同步 Aethersailor、GEOSITE:CN 与 GEOSITE:GFW 本地索引，请稍候……")
+	result, err := b.service.SyncWithSource(ctx, "telegram")
 	if err != nil {
-		b.send(ctx, chatID, "同步失败："+err.Error(), homeMenu())
+		b.sendTarget(ctx, chatID, progress, "同步失败："+err.Error(), homeMenu())
 		return
 	}
 	msg := "同步完成：本地索引无变化"
@@ -1000,7 +1139,14 @@ func (b *Bot) sync(ctx context.Context, chatID int64) {
 	if result.Commit != "" {
 		msg += fmt.Sprintf("\n镜像 %d 个文件，commit=%s", result.Changed, short(result.Commit))
 	}
-	b.send(ctx, chatID, msg, homeMenu())
+	state := b.service.SyncStatus()
+	if state.Shared {
+		msg += "\n🔗 已复用正在运行的同步任务"
+	}
+	if state.Duration > 0 {
+		msg += "\n耗时：" + formatDuration(state.Duration)
+	}
+	b.sendTarget(ctx, chatID, progress, msg, homeMenu())
 }
 
 func (b *Bot) status(ctx context.Context, chatID int64) {
@@ -1018,6 +1164,9 @@ func (b *Bot) statusTarget(ctx context.Context, chatID int64, target *models.Mes
 	idx := b.service.CheckIndexStatus(checkCtx)
 	cancel()
 	dns := b.service.LookupStatus()
+	access := b.service.AccessStatus()
+	queued, queueErr := b.service.QueueForUser(chatID)
+	syncState := b.service.SyncStatus()
 	updated := "从未"
 	if !idx.UpdatedAt.IsZero() {
 		updated = idx.UpdatedAt.In(b.cfg.Location).Format("2006-01-02 15:04:05")
@@ -1069,14 +1218,138 @@ func (b *Bot) statusTarget(ctx context.Context, chatID int64, target *models.Mes
 	default:
 		upstream += "\n状态：未检查"
 	}
-	text := fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n👤 个人规则：%d 条%s\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n上游公开镜像：%t\n\n%s", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), storeNote, idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, b.service.SyncEnabled(), upstream)
+	b.mu.Lock()
+	username := b.meUsername
+	b.mu.Unlock()
+	if username == "" {
+		username = "尚未连接"
+	} else {
+		username = "@" + username
+	}
+	mode := "✅ 可读写"
+	if !access.Writable {
+		mode = "🔒 只读"
+	}
+	accessError := access.Error
+	if accessError == "" {
+		accessError = "无"
+	}
+	queueText := fmt.Sprintf("%d 条", len(queued))
+	if queueErr != nil {
+		queueText = "读取失败"
+	}
+	syncText := "空闲"
+	if syncState.Running {
+		syncText = "🔄 运行中 · " + syncState.Source
+		if syncState.Stage != "" {
+			syncText += " · " + syncState.Stage
+		}
+	} else if syncState.Duration > 0 {
+		syncText = "最近耗时 " + formatDuration(syncState.Duration)
+	}
+	if syncState.LastError != "" {
+		syncText += " · ⚠️ " + syncState.LastError
+	}
+	rawState := fmt.Sprintf("%t", access.RawAccessible)
+	if access.RawError != "" {
+		rawState += "（" + access.RawError + "）"
+	}
+	text := fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n👤 个人规则：%d 条%s\n📤 待提交队列：%s\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n同步任务：%s\n上游公开镜像：%t\n\n🔐 凭据与权限\nTelegram：%s\n仓库认证：%t · 读取=%t · 写入=%t · Public=%t\nRaw 访问：%s\n运行模式：%s\n权限异常：%s\n\n%s", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), storeNote, queueText, idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, syncText, b.service.SyncEnabled(), username, access.Authenticated, access.Readable, access.Writable, access.Public, rawState, mode, accessError, upstream)
 	entities := exactTextLinkEntities(text, b.cfg.RuleRepoProject, b.service.RepoWebURL())
 	entities = append(entities, exactTextLinkEntities(text, b.cfg.UpstreamRepo, upstreamRepositoryURL(b.cfg.UpstreamRepo))...)
 	indexedCommitURL := upstreamCommitURL(b.cfg.UpstreamRepo, indexedSHA)
 	entities = append(entities, exactTextLinkEntities(text, short(ruleVersion), indexedCommitURL)...)
 	entities = append(entities, exactTextLinkEntities(text, short(indexedSHA), indexedCommitURL)...)
 	entities = append(entities, exactTextLinkEntities(text, short(idx.UpstreamSHA), upstreamCommitURL(b.cfg.UpstreamRepo, idx.UpstreamSHA))...)
-	b.sendTargetModeEntities(ctx, chatID, target, text, homeEditMenu(), entities, true)
+	b.sendTargetModeEntities(ctx, chatID, target, text, statusMenu(len(queued)), entities, true)
+}
+
+func statusMenu(queueCount int) *models.InlineKeyboardMarkup {
+	rows := [][]button{{{Text: "🧪 OpenClash 覆写自检", Data: "status:selfcheck"}}}
+	if queueCount > 0 {
+		rows = append(rows, []button{{Text: fmt.Sprintf("📤 待提交队列 · %d", queueCount), Data: "queue:list"}})
+	}
+	rows = append(rows, []button{{Text: "🏠 主菜单", Data: "nav:home:edit"}})
+	return keyboard(rows)
+}
+
+func (b *Bot) selfCheckTarget(ctx context.Context, chatID int64, target *models.Message) {
+	b.sendTargetModeEntities(ctx, chatID, target, "🧪 正在检查 OpenClash 个人覆写……\n正在验证仓库、Raw 地址、INI/YAML 结构和规则一致性。", nil, nil, false)
+	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	report := b.service.SelfCheck(checkCtx)
+	cancel()
+	var out strings.Builder
+	out.WriteString("🧪 OpenClash 覆写自检\n")
+	for _, item := range report.Items {
+		icon := "❌"
+		if item.Level == "ok" {
+			icon = "✅"
+		} else if item.Level == "warn" {
+			icon = "⚠️"
+		}
+		fmt.Fprintf(&out, "\n%s %s", icon, item.Text)
+	}
+	fmt.Fprintf(&out, "\n\n结果：通过 %d · 警告 %d · 失败 %d", report.Passed, report.Warnings, report.Failed)
+	out.WriteString("\n\nLuCI 确认路径：\n服务 → OpenClash → 配置订阅 → 编辑当前订阅 → 远程覆写")
+	if report.Failed > 0 {
+		out.WriteString("\n\n仍未生效时：先到 系统 → 软件包 检查依赖，再到 服务 → OpenClash → 插件设置 → 调试日志 → 生成。")
+	}
+	b.sendTarget(ctx, chatID, target, out.String(), keyboard([][]button{{{Text: "↩️ 返回运行状态", Data: "menu:status"}, {Text: "🏠 主菜单", Data: "nav:home:edit"}}}))
+}
+
+func (b *Bot) queueTarget(ctx context.Context, chatID int64, target *models.Message, page int) {
+	items, err := b.service.QueueForUser(chatID)
+	if err != nil {
+		b.sendTarget(ctx, chatID, target, "读取待提交队列失败："+err.Error(), errorMenu())
+		return
+	}
+	const size = 8
+	if page < 0 {
+		page = 0
+	}
+	pages := (len(items) + size - 1) / size
+	if pages == 0 {
+		pages = 1
+	}
+	if page >= pages {
+		page = pages - 1
+	}
+	start := page * size
+	end := min(start+size, len(items))
+	var out strings.Builder
+	fmt.Fprintf(&out, "📤 待提交队列\n共 %d 条 · 第 %d/%d 页", len(items), page+1, pages)
+	rows := [][]button{}
+	for index := start; index < end; index++ {
+		item := items[index]
+		targetText := item.Domain
+		if item.Operation == "add" {
+			targetText = rules.Token(item.Rule)
+		}
+		fmt.Fprintf(&out, "\n\n%d. %s\n状态：%s · 重试 %d 次", index+1, targetText, item.Status, item.Attempts)
+		if item.LastError != "" {
+			fmt.Fprintf(&out, "\n原因：%s", item.LastError)
+		}
+		row := []button{{Text: "🗑️ 取消 · " + short(item.ID), Data: "queue:cancel:" + item.ID}}
+		if item.Status == "paused" {
+			row = append([]button{{Text: "🔄 重新确认", Data: "queue:force:" + item.ID}}, row...)
+		}
+		rows = append(rows, row)
+	}
+	if len(items) == 0 {
+		out.WriteString("\n\n当前没有等待提交的操作。")
+	}
+	var nav []button
+	if page > 0 {
+		nav = append(nav, button{Text: "⬅️ 上一页", Data: fmt.Sprintf("queue:page:%d", page-1)})
+	}
+	if page+1 < pages {
+		nav = append(nav, button{Text: "➡️ 下一页", Data: fmt.Sprintf("queue:page:%d", page+1)})
+	}
+	if len(nav) > 0 {
+		rows = append(rows, nav)
+	}
+	rows = append(rows, []button{{Text: "↩️ 返回运行状态", Data: "menu:status"}, {Text: "🏠 主菜单", Data: "nav:home:edit"}})
+	b.sendTarget(ctx, chatID, target, out.String(), keyboard(rows))
 }
 
 func (b *Bot) helpText() string {
