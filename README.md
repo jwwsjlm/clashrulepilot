@@ -1,6 +1,6 @@
 # ClashRulePilot
 
-个人 OpenClash/Mihomo 规则库与 Telegram 管理 Bot。项目源码位于 `D:\code\myproxy`，Bot 自动维护 GitHub 或 GitLab 公开规则仓库，供 OpenClash 通过 Raw URL 使用。
+个人 OpenClash/Mihomo 规则库与 Telegram 管理 Bot。源码发布在 GitHub `jwwsjlm/clashrulepilot`；GitLab 私有仓库是个人规则唯一权威源，GitLab 公共仓库只保存 OpenClash 可匿名读取的发布镜像。
 
 ## 功能
 
@@ -21,7 +21,7 @@
 
 ## 启动
 
-1. 复制 `.env.example` 为 `.env`，填写 Telegram Token 以及 GitHub 或 GitLab Token。
+1. 复制 `.env.example` 为 `.env`，填写 Telegram Token、私有 GitLab Token 和公共镜像 GitLab Token。
 2. Docker Compose 默认将同级 `./data` 映射到 `/app/data`，索引可以直接从宿主机查看。
 3. 执行 `docker compose pull && docker compose up -d`。
 4. 查看 `docker compose logs -f clashrulepilot`，确认仓库初始化、索引同步和 Telegram polling 均成功。
@@ -49,6 +49,35 @@ RULE_REPO_PROJECT=用户名或群组/clashrulepilot-rules
 RULE_REPO_BRANCH=main
 GITLAB_BASE_URL=https://gitlab.example.com
 GITLAB_TOKEN=新的Token
+```
+
+## 私有源与公共镜像
+
+生产部署建议使用以下配置：
+
+```env
+RULE_REPO_PROVIDER=gitlab
+RULE_REPO_PROJECT=someme/clashrulepilot-rules-private
+RULE_REPO_BRANCH=main
+GITLAB_BASE_URL=https://gitlab.com
+GITLAB_TOKEN=私有项目Token
+
+PUBLIC_RULE_REPO_PROVIDER=gitlab
+PUBLIC_RULE_REPO_PROJECT=someme/clashrulepilot-rules
+PUBLIC_RULE_REPO_BRANCH=main
+PUBLIC_GITLAB_BASE_URL=https://gitlab.com
+PUBLIC_GITLAB_TOKEN=公共镜像项目Token
+SYNC_UPSTREAM=false
+```
+
+Bot 的添加、删除和移动只写入私有仓库；OpenClash 使用公共镜像的 Raw 地址。公共镜像中的域名规则会被外部读取，这是 OpenClash 匿名下载所必需的。GitHub 源码仓库不包含个人规则、Token、`data/` 或运行时日志。
+
+GitHub Actions 工作流 `.github/workflows/sync-upstream.yml` 每天北京时间 03:00（UTC `19:00`）同步 Aethersailor 的 `*_Domain.yaml` 到私有源，再生成公共镜像。需要在 GitHub 仓库设置 `GITLAB_PRIVATE_TOKEN` 和 `GITLAB_PUBLIC_TOKEN` 两个 Secrets，Token 至少具有对应项目的 `api` 权限和 Developer 角色。
+
+也可以一次性执行：
+
+```text
+go run ./cmd/clashrulepilot-sync
 ```
 
 ## Telegram 命令

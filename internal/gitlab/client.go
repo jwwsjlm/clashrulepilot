@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,10 +21,15 @@ type Client struct {
 	owner, repo              string
 	startBranch              string
 	needsBranch              bool
+	visibility               gl.VisibilityValue
 	api                      *gl.Client
 }
 
 func New(baseURL, token, project, branch string) (*Client, error) {
+	return NewWithVisibility(baseURL, token, project, branch, gl.PublicVisibility)
+}
+
+func NewWithVisibility(baseURL, token, project, branch string, visibility gl.VisibilityValue) (*Client, error) {
 	webBase := strings.TrimRight(baseURL, "/")
 	apiBase := webBase
 	if !strings.HasSuffix(apiBase, "/api/v4") {
@@ -57,7 +63,7 @@ func New(baseURL, token, project, branch string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{webBase: webBase, project: strings.Trim(project, "/"), branch: branch, api: api}
+	c := &Client{webBase: webBase, project: strings.Trim(project, "/"), branch: branch, api: api, visibility: visibility}
 	parts := strings.Split(c.project, "/")
 	c.repo = parts[len(parts)-1]
 	if len(parts) > 1 {
@@ -142,7 +148,7 @@ func (c *Client) EnsureRepo(ctx context.Context) error {
 		return fmt.Errorf("gitlab project: %w", err)
 	}
 	opt := &gl.CreateProjectOptions{
-		Name: gl.Ptr(c.repo), Path: gl.Ptr(c.repo), Visibility: gl.Ptr(gl.PublicVisibility), InitializeWithReadme: gl.Ptr(true),
+		Name: gl.Ptr(c.repo), Path: gl.Ptr(c.repo), Visibility: gl.Ptr(c.visibility), InitializeWithReadme: gl.Ptr(true),
 	}
 	if c.owner != "" {
 		if ns, nsResp, nsErr := c.api.Namespaces.GetNamespace(c.owner, gl.WithContext(ctx)); nsErr == nil && nsResp.StatusCode < 300 {
@@ -212,6 +218,14 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 	if len(expectedRevisions) > 0 {
 		expectedRevision = expectedRevisions[0]
 	}
+	changes := make(map[string]repository.FileChange, len(files))
+	for file, content := range files {
+		changes[file] = repository.FileChange{Content: content}
+	}
+	return c.CommitChanges(ctx, changes, message, expectedRevision)
+}
+
+func (c *Client) CommitChanges(ctx context.Context, changes map[string]repository.FileChange, message, expectedRevision string) (string, error) {
 	if expectedRevision != "" {
 		head, err := c.HeadRevision(ctx)
 		if err != nil {
@@ -221,22 +235,34 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 			return "", repository.ErrConflict
 		}
 	}
-	actions := make([]*gl.CommitActionOptions, 0, len(files))
-	for file, content := range files {
+	actions := make([]*gl.CommitActionOptions, 0, len(changes))
+	for file, change := range changes {
 		_, lastCommit, err := c.GetFile(ctx, file)
 		if err != nil {
 			return "", err
 		}
 		action := gl.FileCreate
+		if change.Delete {
+			if lastCommit == "" {
+				continue
+			}
+			action = gl.FileDelete
+			item := &gl.CommitActionOptions{Action: &action, FilePath: gl.Ptr(file), LastCommitID: &lastCommit}
+			actions = append(actions, item)
+			continue
+		}
 		if lastCommit != "" {
 			action = gl.FileUpdate
 		}
-		encoded := base64.StdEncoding.EncodeToString(content)
+		encoded := base64.StdEncoding.EncodeToString(change.Content)
 		item := &gl.CommitActionOptions{Action: &action, FilePath: gl.Ptr(file), Content: &encoded, Encoding: gl.Ptr("base64")}
 		if lastCommit != "" {
 			item.LastCommitID = &lastCommit
 		}
 		actions = append(actions, item)
+	}
+	if len(actions) == 0 {
+		return "", nil
 	}
 	opt := &gl.CreateCommitOptions{Branch: gl.Ptr(c.branch), CommitMessage: &message, Actions: actions}
 	if c.needsBranch {
@@ -251,4 +277,32 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 	}
 	c.needsBranch = false
 	return commit.ID, nil
+}
+
+func (c *Client) ListFiles(ctx context.Context, directory, revision string) ([]string, error) {
+	if strings.TrimSpace(revision) == "" {
+		revision = c.branch
+	}
+	opt := &gl.ListTreeOptions{Ref: gl.Ptr(revision), Recursive: gl.Ptr(true), ListOptions: gl.ListOptions{PerPage: 100, Page: 1}}
+	if strings.TrimSpace(directory) != "" {
+		opt.Path = gl.Ptr(strings.Trim(directory, "/"))
+	}
+	files := make([]string, 0)
+	for {
+		nodes, resp, err := c.api.Repositories.ListTree(c.project, opt, gl.WithContext(ctx))
+		if err != nil {
+			return nil, err
+		}
+		for _, node := range nodes {
+			if node != nil && node.Type == "blob" {
+				files = append(files, node.Path)
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+	sort.Strings(files)
+	return files, nil
 }

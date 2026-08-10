@@ -39,7 +39,7 @@ func main() {
 		log.Printf("data directory warning: %s", runtimeInfo.Warning)
 	}
 	log.Printf("data directory ready path=%s uid=%d gid=%d dropped_root=%t", cfg.DataDir, runtimeInfo.UID, runtimeInfo.GID, runtimeInfo.Dropped)
-	log.Printf("starting ClashRulePilot provider=%s repo=%s branch=%s sync_upstream=%t upstream_index=%t doh=%t telegram_enabled=%t", cfg.RuleRepoProvider, cfg.RuleRepoProject, cfg.RuleRepoBranch, cfg.SyncUpstream, cfg.UpstreamIndex, cfg.DoHEnabled, cfg.TelegramToken != "")
+	log.Printf("starting ClashRulePilot private_provider=%s private_repo=%s private_branch=%s public_provider=%s public_repo=%s public_branch=%s sync_upstream=%t upstream_index=%t doh=%t telegram_enabled=%t", cfg.RuleRepoProvider, cfg.RuleRepoProject, cfg.RuleRepoBranch, cfg.PublicRuleRepoProvider, cfg.PublicRuleRepoProject, cfg.PublicRuleRepoBranch, cfg.SyncUpstream, cfg.UpstreamIndex, cfg.DoHEnabled, cfg.TelegramToken != "")
 	service, err := app.New(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -57,6 +57,8 @@ func main() {
 		mode = "read-only"
 	}
 	log.Printf("%s preflight authenticated=%t user=%s readable=%t writable=%t public=%t raw_accessible=%t mode=%s error=%q", cfg.RuleRepoProvider, access.Authenticated, access.User, access.Readable, access.Writable, access.Public, access.RawAccessible, mode, access.Error)
+	publicAccess := service.PublicAccessStatus()
+	log.Printf("public mirror preflight provider=%s repo=%s readable=%t writable=%t public=%t revision=%s error=%q", cfg.PublicRuleRepoProvider, cfg.PublicRuleRepoProject, publicAccess.Readable, publicAccess.Writable, publicAccess.Public, shortRevision(publicAccess.Revision), publicAccess.Error)
 	log.Printf("%s bootstrap complete; service ready", cfg.RuleRepoProvider)
 	if cfg.TelegramToken == "" {
 		log.Printf("Telegram disabled: TELEGRAM_BOT_TOKEN is empty")
@@ -98,6 +100,13 @@ func main() {
 		}()
 	}
 	<-ctx.Done()
+}
+
+func shortRevision(value string) string {
+	if len(value) > 12 {
+		return value[:12]
+	}
+	return value
 }
 
 func init() {

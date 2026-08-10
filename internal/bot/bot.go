@@ -1165,6 +1165,7 @@ func (b *Bot) statusTarget(ctx context.Context, chatID int64, target *models.Mes
 	cancel()
 	dns := b.service.LookupStatus()
 	access := b.service.AccessStatus()
+	publicAccess := b.service.PublicAccessStatus()
 	queued, queueErr := b.service.QueueForUser(chatID)
 	syncState := b.service.SyncStatus()
 	updated := "从未"
@@ -1250,12 +1251,13 @@ func (b *Bot) statusTarget(ctx context.Context, chatID int64, target *models.Mes
 	if syncState.LastError != "" {
 		syncText += " · ⚠️ " + syncState.LastError
 	}
-	rawState := fmt.Sprintf("%t", access.RawAccessible)
-	if access.RawError != "" {
-		rawState += "（" + access.RawError + "）"
+	rawState := fmt.Sprintf("%t", publicAccess.RawAccessible)
+	if publicAccess.RawError != "" {
+		rawState += "（" + publicAccess.RawError + "）"
 	}
-	text := fmt.Sprintf("ClashRulePilot 运行状态\n发布仓库：%s (%s)\n👤 个人规则：%d 条%s\n📤 待提交队列：%s\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n同步任务：%s\n上游公开镜像：%t\n\n🔐 凭据与权限\nTelegram：%s\n仓库认证：%t · 读取=%t · 写入=%t · Public=%t\nRaw 访问：%s\n运行模式：%s\n权限异常：%s\n\n%s", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, len(store.Rules), storeNote, queueText, idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, syncText, b.service.SyncEnabled(), username, access.Authenticated, access.Readable, access.Writable, access.Public, rawState, mode, accessError, upstream)
-	entities := exactTextLinkEntities(text, b.cfg.RuleRepoProject, b.service.RepoWebURL())
+	text := fmt.Sprintf("ClashRulePilot 运行状态\n🔐 私有规则源：%s (%s)\n🌐 公共发布镜像：%s (%s)\n👤 个人规则：%d 条%s\n📤 待提交队列：%s\n磁盘查询数据库：%t / 已加载=%t\n落地规则文件：%d 个（只保留远端当前版本）\n索引规则：直连 %d · 代理 %d · 分类 %d · GEOSITE:CN %d · GEOSITE:GFW %d\n索引更新时间：%s\n索引异常：%s\n公网 DNS：启用=%t · 国内=%t · 国外=%t · 缓存=%d · 最近=%s\nDNS 异常：%s\n同步任务：%s\n容器上游公开镜像：%t\n\n🔐 凭据与权限\nTelegram：%s\n私有源：认证=%t · 读取=%t · 写入=%t · commit=%s\n公共镜像：读取=%t · 写入=%t · Public=%t · commit=%s\n公共 Raw：%s\n运行模式：%s\n权限异常：%s\n\n%s", b.cfg.RuleRepoProject, b.cfg.RuleRepoProvider, b.cfg.PublicRuleRepoProject, b.cfg.PublicRuleRepoProvider, len(store.Rules), storeNote, queueText, idx.Enabled, idx.Loaded, idx.Sources, idx.Direct, idx.Proxy, idx.Category, idx.GeoSite, idx.GFW, updated, lastError, dns.Enabled, dns.Domestic, dns.Foreign, dns.CacheEntries, provider, dohError, syncText, b.service.SyncEnabled(), username, access.Authenticated, access.Readable, access.Writable, short(access.Revision), publicAccess.Readable, publicAccess.Writable, publicAccess.Public, short(publicAccess.Revision), rawState, mode, accessError, upstream)
+	entities := exactTextLinkEntities(text, b.cfg.RuleRepoProject, b.service.PrivateRepoWebURL())
+	entities = append(entities, exactTextLinkEntities(text, b.cfg.PublicRuleRepoProject, b.service.RepoWebURL())...)
 	entities = append(entities, exactTextLinkEntities(text, b.cfg.UpstreamRepo, upstreamRepositoryURL(b.cfg.UpstreamRepo))...)
 	indexedCommitURL := upstreamCommitURL(b.cfg.UpstreamRepo, indexedSHA)
 	entities = append(entities, exactTextLinkEntities(text, short(ruleVersion), indexedCommitURL)...)

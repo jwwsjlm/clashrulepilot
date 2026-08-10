@@ -1,0 +1,45 @@
+name: Sync upstream rules
+
+on:
+  schedule:
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: clashrulepilot-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_ALLOWLIST: ""
+      RULE_REPO_PROVIDER: gitlab
+      RULE_REPO_PROJECT: someme/clashrulepilot-rules-private
+      RULE_REPO_BRANCH: main
+      GITLAB_BASE_URL: https://gitlab.com
+      GITLAB_TOKEN: ${{ secrets.GITLAB_PRIVATE_TOKEN }}
+      PUBLIC_RULE_REPO_PROVIDER: gitlab
+      PUBLIC_RULE_REPO_PROJECT: someme/clashrulepilot-rules
+      PUBLIC_RULE_REPO_BRANCH: main
+      PUBLIC_GITLAB_BASE_URL: https://gitlab.com
+      PUBLIC_GITLAB_TOKEN: ${{ secrets.GITLAB_PUBLIC_TOKEN }}
+      UPSTREAM_REPO: Aethersailor/Custom_OpenClash_Rules
+      UPSTREAM_BRANCH: main
+      SYNC_UPSTREAM: "true"
+      UPSTREAM_INDEX_ENABLED: "false"
+      DATA_DIR: ${{ runner.temp }}/clashrulepilot
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Synchronize private source and public mirror
+        run: go run ./cmd/clashrulepilot-sync

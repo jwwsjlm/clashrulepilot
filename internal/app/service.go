@@ -26,6 +26,7 @@ import (
 	runtimestate "clashrulepilot/internal/state"
 	"clashrulepilot/internal/syncer"
 	"github.com/goccy/go-yaml"
+	gitlabapi "gitlab.com/gitlab-org/api/client-go"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -34,6 +35,8 @@ const personalPath = "data/personal_rules.json"
 type Service struct {
 	cfg            config.Config
 	repo           repository.Repository
+	privateRepo    repository.Repository
+	publicRepo     repository.Repository
 	upstream       *syncer.Client
 	index          *ruleindex.Manager
 	lookup         *lookup.Inspector
@@ -47,6 +50,7 @@ type Service struct {
 	storeFetchedAt time.Time
 	accessMu       sync.RWMutex
 	access         repository.AccessReport
+	publicAccess   repository.AccessReport
 	syncGroup      singleflight.Group
 	syncStatusMu   sync.RWMutex
 	syncStatus     SyncStatus
@@ -118,18 +122,13 @@ type SelfCheckReport struct {
 }
 
 func New(cfg config.Config) (*Service, error) {
-	var repo repository.Repository
-	switch cfg.RuleRepoProvider {
-	case "github":
-		repo = gh.New(cfg.GitHubToken, cfg.RuleRepoProject, cfg.RuleRepoBranch)
-	case "gitlab":
-		var err error
-		repo, err = gl.New(cfg.GitLabBaseURL, cfg.GitLabToken, cfg.RuleRepoProject, cfg.RuleRepoBranch)
-		if err != nil {
-			return nil, fmt.Errorf("initialize GitLab client: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("unsupported rule repository provider %q", cfg.RuleRepoProvider)
+	privateRepo, err := makeRepo(cfg.RuleRepoProvider, cfg.RuleRepoProject, cfg.RuleRepoBranch, cfg.GitHubToken, cfg.GitLabToken, cfg.GitLabBaseURL, false)
+	if err != nil {
+		return nil, fmt.Errorf("initialize private repository: %w", err)
+	}
+	publicRepo, err := makeRepo(cfg.PublicRuleRepoProvider, cfg.PublicRuleRepoProject, cfg.PublicRuleRepoBranch, cfg.GitHubToken, cfg.PublicGitLabToken, cfg.PublicGitLabBaseURL, true)
+	if err != nil {
+		return nil, fmt.Errorf("initialize public repository: %w", err)
 	}
 	stateDB, err := runtimestate.Open(cfg.DataDir)
 	if err != nil {
@@ -138,7 +137,7 @@ func New(cfg config.Config) (*Service, error) {
 	if err := stateDB.ImportLegacy(filepath.Join(cfg.DataDir, "personal_rules.cache.json")); err != nil {
 		log.Printf("legacy personal rules cache import failed: %v", err)
 	}
-	service := &Service{cfg: cfg, repo: repo, state: stateDB, upstream: syncer.New(cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), index: ruleindex.New(cfg.UpstreamIndex, cfg.DataDir, cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), lookup: lookup.New(cfg.GeoIPAPIURL, lookup.DoHConfig{
+	service := &Service{cfg: cfg, repo: privateRepo, privateRepo: privateRepo, publicRepo: publicRepo, state: stateDB, upstream: syncer.New(cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), index: ruleindex.New(cfg.UpstreamIndex, cfg.DataDir, cfg.UpstreamRepo, cfg.UpstreamBranch, cfg.GitHubToken), lookup: lookup.New(cfg.GeoIPAPIURL, lookup.DoHConfig{
 		Enabled: cfg.DoHEnabled, Endpoints: cfg.DoHAPIURLs,
 		Domestic: lookup.DNSGroupConfig{Enabled: cfg.DomesticDNSEnabled, Endpoints: cfg.DomesticDNSURLs},
 		Foreign:  lookup.DNSGroupConfig{Enabled: cfg.ForeignDNSEnabled, Endpoints: cfg.ForeignDNSURLs},
@@ -154,6 +153,21 @@ func New(cfg config.Config) (*Service, error) {
 	}
 	return service, nil
 }
+
+func makeRepo(provider, project, branch, githubToken, gitlabToken, gitlabBase string, public bool) (repository.Repository, error) {
+	switch strings.ToLower(provider) {
+	case "github":
+		return gh.New(githubToken, project, branch), nil
+	case "gitlab":
+		visibility := gitlabapi.PrivateVisibility
+		if public {
+			visibility = gitlabapi.PublicVisibility
+		}
+		return gl.NewWithVisibility(gitlabBase, gitlabToken, project, branch, visibility)
+	default:
+		return nil, fmt.Errorf("unsupported repository provider %q", provider)
+	}
+}
 func (s *Service) Close() error {
 	indexErr := s.index.Close()
 	stateErr := s.state.Close()
@@ -164,8 +178,19 @@ func (s *Service) Close() error {
 }
 func (s *Service) SyncEnabled() bool             { return s.cfg.SyncUpstream }
 func (s *Service) IndexEnabled() bool            { return s.cfg.UpstreamIndex }
-func (s *Service) RepoWebURL() string            { return s.repo.WebURL() }
-func (s *Service) RepoRawURL(file string) string { return s.repo.RawURL(file) }
+func (s *Service) RepoWebURL() string            { return s.publishRepo().WebURL() }
+func (s *Service) RepoRawURL(file string) string { return s.publishRepo().RawURL(file) }
+func (s *Service) PrivateRepoWebURL() string     { return s.privateRepo.WebURL() }
+
+func (s *Service) publishRepo() repository.Repository {
+	if s.publicRepo != nil {
+		return s.publicRepo
+	}
+	if s.privateRepo != nil {
+		return s.privateRepo
+	}
+	return s.repo
+}
 func (s *Service) IndexStatus() ruleindex.Status { return s.index.Status() }
 func (s *Service) CheckIndexStatus(ctx context.Context) ruleindex.Status {
 	return s.index.CheckLatest(ctx)
@@ -175,6 +200,11 @@ func (s *Service) AccessStatus() repository.AccessReport {
 	s.accessMu.RLock()
 	defer s.accessMu.RUnlock()
 	return s.access
+}
+func (s *Service) PublicAccessStatus() repository.AccessReport {
+	s.accessMu.RLock()
+	defer s.accessMu.RUnlock()
+	return s.publicAccess
 }
 func (s *Service) ReadOnly() bool                          { access := s.AccessStatus(); return !access.Writable }
 func (s *Service) Queue() ([]runtimestate.Mutation, error) { return s.state.Mutations() }
@@ -293,6 +323,18 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("load upstream index: %w", err)
 	}
 	access := s.Preflight(ctx)
+	publicAccess := s.publicRepo.CheckAccess(ctx)
+	s.accessMu.Lock()
+	s.publicAccess = publicAccess
+	s.accessMu.Unlock()
+	if !publicAccess.Readable && publicAccess.Authenticated {
+		if err := s.publicRepo.EnsureRepo(ctx); err == nil {
+			publicAccess = s.publicRepo.CheckAccess(ctx)
+			s.accessMu.Lock()
+			s.publicAccess = publicAccess
+			s.accessMu.Unlock()
+		}
+	}
 	if !access.Readable && access.Authenticated {
 		if err := s.repo.EnsureRepo(ctx); err == nil {
 			access = s.Preflight(ctx)
@@ -338,6 +380,10 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 
 func (s *Service) Preflight(ctx context.Context) repository.AccessReport {
 	report := s.repo.CheckAccess(ctx)
+	publicReport := repository.AccessReport{}
+	if s.publicRepo != nil {
+		publicReport = s.publicRepo.CheckAccess(ctx)
+	}
 	previous := s.AccessStatus()
 	if report.Transient && previous.Writable {
 		report.Authenticated = previous.Authenticated
@@ -354,9 +400,9 @@ func (s *Service) Preflight(ctx context.Context) repository.AccessReport {
 	if report.Readable && report.Authenticated && !report.Writable && report.Error == "" {
 		report.Error = "Token 对目标仓库没有写权限"
 	}
-	if report.Public && report.Readable {
+	if publicReport.Public && publicReport.Readable {
 		checkCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
-		request, requestErr := http.NewRequestWithContext(checkCtx, http.MethodGet, s.repo.RawURL("openclash/personal-overwrite.ini"), nil)
+		request, requestErr := http.NewRequestWithContext(checkCtx, http.MethodGet, s.publishRepo().RawURL("openclash/personal-overwrite.ini"), nil)
 		var response *http.Response
 		var err error
 		if requestErr == nil {
@@ -365,11 +411,11 @@ func (s *Service) Preflight(ctx context.Context) repository.AccessReport {
 			err = requestErr
 		}
 		if err != nil {
-			report.RawError = err.Error()
+			publicReport.RawError = err.Error()
 		} else {
-			report.RawAccessible = response.StatusCode == http.StatusOK
-			if !report.RawAccessible {
-				report.RawError = fmt.Sprintf("HTTP %d", response.StatusCode)
+			publicReport.RawAccessible = response.StatusCode == http.StatusOK
+			if !publicReport.RawAccessible {
+				publicReport.RawError = fmt.Sprintf("HTTP %d", response.StatusCode)
 			}
 			response.Body.Close()
 		}
@@ -377,6 +423,9 @@ func (s *Service) Preflight(ctx context.Context) repository.AccessReport {
 	}
 	s.accessMu.Lock()
 	s.access = report
+	if !publicReport.CheckedAt.IsZero() {
+		s.publicAccess = publicReport
+	}
 	s.accessMu.Unlock()
 	if s.state != nil {
 		if err := s.state.SaveAccess(report); err != nil {
@@ -517,6 +566,9 @@ func (s *Service) AddRule(ctx context.Context, r rules.Rule, force bool) (Result
 		if cacheErr := s.persistStoreState(store, sha); cacheErr != nil {
 			log.Printf("personal rules state write failed after add: %v", cacheErr)
 		}
+		if err := s.publishCurrentPublic(ctx, store, sha); err != nil {
+			log.Printf("public mirror update pending after add: %v", err)
+		}
 		return Result{Commit: sha, Changed: 1, Store: store, Related: related}, nil
 	}
 	return Result{}, repository.ErrConflict
@@ -563,6 +615,9 @@ func (s *Service) RemoveRule(ctx context.Context, domainName string, match *rule
 		}
 		s.setStoreSnapshot(store, sha, time.Now().UTC())
 		_ = s.persistStoreState(store, sha)
+		if err := s.publishCurrentPublic(ctx, store, sha); err != nil {
+			log.Printf("public mirror update pending after remove: %v", err)
+		}
 		return Result{Commit: sha, Changed: n, Store: store}, nil
 	}
 	return Result{}, repository.ErrConflict
@@ -679,9 +734,42 @@ func (s *Service) applyQueued(ctx context.Context, item runtimestate.Mutation) e
 	}
 	s.setStoreSnapshot(store, sha, time.Now().UTC())
 	_ = s.persistStoreState(store, sha)
+	if err := s.publishCurrentPublic(ctx, store, sha); err != nil {
+		log.Printf("public mirror update pending after queued mutation: %v", err)
+	}
 	_ = s.state.DeleteMutation(item.ID)
 	s.sendNotice(item.ChatID, fmt.Sprintf("✅ 排队规则已提交\n变更：%d 条\ncommit：%s", changed, shortSHA(sha)))
 	return nil
+}
+
+func (s *Service) publishCurrentPublic(ctx context.Context, store rules.Store, sourceCommit string) error {
+	if s.publicRepo == nil || s.privateRepo == nil {
+		return nil
+	}
+	revision := sourceCommit
+	if revision == "" {
+		revision, _ = s.privateRepo.HeadRevision(ctx)
+	}
+	extended, ok := s.privateRepo.(repository.ExtendedRepository)
+	if !ok {
+		return nil
+	}
+	paths, err := extended.ListFiles(ctx, "rules/upstream", revision)
+	if err != nil {
+		return err
+	}
+	upstream := make(map[string][]byte)
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "rules/upstream/") {
+			continue
+		}
+		b, _, err := s.privateRepo.GetFileAtRevision(ctx, p, revision)
+		if err != nil {
+			return err
+		}
+		upstream[strings.TrimPrefix(p, "rules/upstream/")] = b
+	}
+	return s.publishPublic(ctx, store, upstream, sourceCommit)
 }
 
 func (s *Service) deferMutation(item runtimestate.Mutation, err error) error {
@@ -812,11 +900,56 @@ func (s *Service) syncOnce(ctx context.Context) (Result, error) {
 	}
 	files["metadata/upstream.json"] = metaBytes
 	revision, _ := s.repo.HeadRevision(ctx)
-	sha, err := s.commitChanged(ctx, files, "chore: sync upstream rules", revision)
+	sha, err := s.commitChangedTo(ctx, s.privateRepo, files, "chore: sync upstream rules", revision, "rules/upstream/")
 	if err != nil {
 		return Result{}, err
 	}
+	if sha == "" {
+		sha, _ = s.privateRepo.HeadRevision(ctx)
+	}
+	if err := s.publishPublic(ctx, store, up, sha); err != nil {
+		return Result{}, fmt.Errorf("private source committed but public mirror publish pending: %w", err)
+	}
 	return Result{Commit: sha, Changed: len(up), Store: store, IndexChanged: indexChanged}, indexErr
+}
+
+// publishPublic renders the current private source into the public OpenClash mirror.
+// Private-only management data such as personal_rules.json is deliberately omitted.
+func (s *Service) publishPublic(ctx context.Context, store rules.Store, upstream map[string][]byte, sourceCommit string) error {
+	if s.publicRepo == nil {
+		return nil
+	}
+	files, err := s.desiredFiles(ctx, &store, nil, upstream)
+	if err != nil {
+		return err
+	}
+	delete(files, personalPath)
+	delete(files, "metadata/upstream.json")
+	upstreamCommit, _ := s.upstream.HeadRevision(ctx)
+	distribution, _ := json.MarshalIndent(map[string]any{
+		"source_repository":   s.privateRepo.Owner() + "/" + s.privateRepo.Repo(),
+		"source_commit":       sourceCommit,
+		"upstream_repository": s.cfg.UpstreamRepo,
+		"upstream_commit":     upstreamCommit,
+		"published_at":        time.Now().UTC().Format(time.RFC3339),
+	}, "", "  ")
+	if old, _, _ := s.publicRepo.GetFile(ctx, "metadata/distribution.json"); len(old) > 0 {
+		var previous map[string]any
+		if json.Unmarshal(old, &previous) == nil && fmt.Sprint(previous["source_commit"]) == sourceCommit && fmt.Sprint(previous["upstream_commit"]) == upstreamCommit {
+			distribution = old
+		}
+	}
+	if len(distribution) == 0 || distribution[len(distribution)-1] != '\n' {
+		distribution = append(distribution, '\n')
+	}
+	files["metadata/distribution.json"] = distribution
+	revision, err := s.publicRepo.HeadRevision(ctx)
+	if err != nil {
+		revision = ""
+	}
+	_, err = s.commitChangedTo(ctx, s.publicRepo, files, "chore: publish public rules mirror", revision,
+		"rules/upstream/", "rules/personal/", "openclash/", "metadata/")
+	return err
 }
 
 func (s *Service) Query(ctx context.Context, domainName string) (QueryResult, error) {
@@ -875,20 +1008,42 @@ func (s *Service) SelfCheck(ctx context.Context) SelfCheckReport {
 			report.Failed++
 		}
 	}
-	access := s.Preflight(ctx)
-	if access.Readable {
-		add("ok", "发布仓库和分支可访问")
+	privateAccess := s.Preflight(ctx)
+	publicAccess := s.PublicAccessStatus()
+	privateRepo := s.privateRepo
+	if privateRepo == nil {
+		privateRepo = s.repo
+	}
+	publicRepo := s.publicRepo
+	if publicRepo == nil {
+		publicRepo = privateRepo
+	}
+	if publicAccess.CheckedAt.IsZero() && publicRepo != nil {
+		publicAccess = publicRepo.CheckAccess(ctx)
+		s.accessMu.Lock()
+		s.publicAccess = publicAccess
+		s.accessMu.Unlock()
+	}
+	if privateAccess.Readable {
+		add("ok", "私有规则源可访问")
 	} else {
-		add("fail", "发布仓库不可读："+access.Error)
+		add("fail", "私有规则源不可读："+privateAccess.Error)
 		return report
 	}
-	if access.Public {
-		add("ok", "规则仓库为公开仓库")
+	if publicAccess.Readable {
+		add("ok", "公共发布镜像可访问")
 	} else {
-		add("fail", "规则仓库不是公开仓库，OpenClash 无法匿名下载 Raw 文件")
+		add("fail", "公共发布镜像不可读："+publicAccess.Error)
+		return report
 	}
-	revision := access.Revision
-	storeBytes, _, err := s.repo.GetFileAtRevision(ctx, personalPath, revision)
+	if publicAccess.Public {
+		add("ok", "公共发布镜像为公开仓库")
+	} else {
+		add("fail", "公共发布镜像不是公开仓库，OpenClash 无法匿名下载 Raw 文件")
+	}
+	privateRevision := privateAccess.Revision
+	publicRevision := publicAccess.Revision
+	storeBytes, _, err := privateRepo.GetFileAtRevision(ctx, personalPath, privateRevision)
 	if err != nil {
 		add("fail", "读取 personal_rules.json 失败："+err.Error())
 		return report
@@ -899,7 +1054,7 @@ func (s *Service) SelfCheck(ctx context.Context) SelfCheckReport {
 		return report
 	}
 	add("ok", fmt.Sprintf("personal_rules.json：%d 条", len(store.Rules)))
-	overwriteBytes, _, err := s.repo.GetFileAtRevision(ctx, "openclash/personal-overwrite.ini", revision)
+	overwriteBytes, _, err := publicRepo.GetFileAtRevision(ctx, "openclash/personal-overwrite.ini", publicRevision)
 	if err != nil || len(overwriteBytes) == 0 {
 		if err == nil {
 			err = errors.New("文件不存在")
@@ -961,7 +1116,7 @@ func (s *Service) SelfCheck(ctx context.Context) SelfCheckReport {
 		add("fail", fmt.Sprintf("发现 %d 条重复规则", duplicates))
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, s.repo.RawURL("openclash/personal-overwrite.ini"), nil)
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, s.publishRepo().RawURL("openclash/personal-overwrite.ini"), nil)
 	response, rawErr := client.Do(request)
 	if rawErr != nil {
 		add("fail", "Raw 地址访问失败："+rawErr.Error())
@@ -1018,38 +1173,70 @@ func (s *Service) desiredFiles(ctx context.Context, store *rules.Store, encoded 
 }
 
 func (s *Service) commitChanged(ctx context.Context, files map[string][]byte, msg, expectedRevision string) (string, error) {
+	repo := s.privateRepo
+	if repo == nil {
+		repo = s.repo
+	}
+	return s.commitChangedTo(ctx, repo, files, msg, expectedRevision)
+}
+
+func (s *Service) commitChangedTo(ctx context.Context, repo repository.Repository, files map[string][]byte, msg, expectedRevision string, deletePrefixes ...string) (string, error) {
 	if expectedRevision == "" {
 		var err error
-		expectedRevision, err = s.repo.HeadRevision(ctx)
+		expectedRevision, err = repo.HeadRevision(ctx)
 		if err != nil {
 			expectedRevision = ""
 		}
 	}
-	changed := map[string][]byte{}
+	changed := map[string]repository.FileChange{}
 	for p, b := range files {
-		old, _, err := s.repo.GetFileAtRevision(ctx, p, expectedRevision)
+		old, _, err := repo.GetFileAtRevision(ctx, p, expectedRevision)
 		if err != nil {
 			return "", err
 		}
 		if string(old) != string(b) {
-			changed[p] = b
+			changed[p] = repository.FileChange{Content: b}
+		}
+	}
+	if len(deletePrefixes) > 0 && expectedRevision != "" {
+		if extended, ok := repo.(repository.ExtendedRepository); ok {
+			for _, prefix := range deletePrefixes {
+				existing, err := extended.ListFiles(ctx, prefix, expectedRevision)
+				if err != nil {
+					return "", err
+				}
+				for _, p := range existing {
+					if _, ok := files[p]; !ok {
+						changed[p] = repository.FileChange{Delete: true}
+					}
+				}
+			}
 		}
 	}
 	if len(changed) == 0 {
 		return "", nil
 	}
-	return s.repo.CommitFiles(ctx, changed, msg, expectedRevision)
+	if extended, ok := repo.(repository.ExtendedRepository); ok {
+		return extended.CommitChanges(ctx, changed, msg, expectedRevision)
+	}
+	legacy := make(map[string][]byte, len(changed))
+	for p, change := range changed {
+		if !change.Delete {
+			legacy[p] = change.Content
+		}
+	}
+	return repo.CommitFiles(ctx, legacy, msg, expectedRevision)
 }
 func (s *Service) readme() string {
 	return fmt.Sprintf("# ClashRulePilot Rules\n\n个人 OpenClash/Mihomo 规则库，由 ClashRulePilot 维护。代理策略组默认为 `%s`。\n\n上游：[%s](https://github.com/%s)\n\nOpenClash 推荐使用 `openclash/personal-overwrite.ini`。该文件将个人规则以显式 `+rules` 写入，并按精确度排序，使更具体的子域名例外优先。\n\n项目源码不包含在本规则仓库中，本仓库只发布规则文件。\n", s.cfg.ProxyPolicyGroup, s.cfg.UpstreamRepo, s.cfg.UpstreamRepo)
 }
 func (s *Service) providers(upstream map[string][]byte) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "rule-providers:\n  my_proxy:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    interval: 86400\n  my_direct:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    interval: 86400\n", s.repo.RawURL("rules/personal/My_Proxy_Domain.yaml"), s.repo.RawURL("rules/personal/My_Direct_Domain.yaml"))
+	fmt.Fprintf(&b, "rule-providers:\n  my_proxy:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    interval: 86400\n  my_direct:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    interval: 86400\n", s.publishRepo().RawURL("rules/personal/My_Proxy_Domain.yaml"), s.publishRepo().RawURL("rules/personal/My_Direct_Domain.yaml"))
 	names := sortedNames(upstream)
 	for _, name := range names {
 		provider := providerName(name)
-		fmt.Fprintf(&b, "  %s:\n    type: http\n    behavior: %s\n    format: yaml\n    url: %s\n    interval: 86400\n", provider, providerBehavior(name), s.repo.RawURL("rules/upstream/"+name))
+		fmt.Fprintf(&b, "  %s:\n    type: http\n    behavior: %s\n    format: yaml\n    url: %s\n    interval: 86400\n", provider, providerBehavior(name), s.publishRepo().RawURL("rules/upstream/"+name))
 	}
 	return b.String()
 }
@@ -1057,11 +1244,11 @@ func (s *Service) ruleOrder(upstream map[string][]byte) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "rules:\n  - RULE-SET,my_proxy,%s\n  - RULE-SET,my_direct,DIRECT\n", s.cfg.ProxyPolicyGroup)
 	for _, name := range sortedNames(upstream) {
-		action := "DIRECT"
-		if strings.HasPrefix(name, "Custom_Proxy_") {
-			action = s.cfg.ProxyPolicyGroup
+		if strings.HasPrefix(name, "Custom_Direct_") {
+			fmt.Fprintf(&b, "  - RULE-SET,%s,DIRECT\n", providerName(name))
+		} else if strings.HasPrefix(name, "Custom_Proxy_") {
+			fmt.Fprintf(&b, "  - RULE-SET,%s,%s\n", providerName(name), s.cfg.ProxyPolicyGroup)
 		}
-		fmt.Fprintf(&b, "  - RULE-SET,%s,%s\n", providerName(name), action)
 	}
 	return b.String()
 }

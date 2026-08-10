@@ -12,12 +12,17 @@ type Config struct {
 	TelegramToken string
 	Allowlist     map[int64]bool
 
-	RuleRepoProvider string
-	RuleRepoProject  string
-	RuleRepoBranch   string
-	GitHubToken      string
-	GitLabToken      string
-	GitLabBaseURL    string
+	RuleRepoProvider       string
+	RuleRepoProject        string
+	RuleRepoBranch         string
+	PublicRuleRepoProvider string
+	PublicRuleRepoProject  string
+	PublicRuleRepoBranch   string
+	GitHubToken            string
+	GitLabToken            string
+	PublicGitLabToken      string
+	GitLabBaseURL          string
+	PublicGitLabBaseURL    string
 
 	UpstreamRepo          string
 	UpstreamBranch        string
@@ -67,6 +72,10 @@ func Load() (Config, error) {
 	provider := strings.ToLower(getenv("RULE_REPO_PROVIDER", "github"))
 	if provider != "github" && provider != "gitlab" {
 		return Config{}, fmt.Errorf("RULE_REPO_PROVIDER must be github or gitlab")
+	}
+	publicProvider := strings.ToLower(getenv("PUBLIC_RULE_REPO_PROVIDER", provider))
+	if publicProvider != "github" && publicProvider != "gitlab" {
+		return Config{}, fmt.Errorf("PUBLIC_RULE_REPO_PROVIDER must be github or gitlab")
 	}
 	legacyRepo := getenv("GITHUB_RULE_REPO_NAME", "clash-rule-pilot-rules")
 	legacyBranch := getenv("GITHUB_BRANCH", "main")
@@ -124,8 +133,10 @@ func Load() (Config, error) {
 	return Config{
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"), Allowlist: allow,
 		RuleRepoProvider: provider, RuleRepoProject: getenv("RULE_REPO_PROJECT", legacyRepo), RuleRepoBranch: getenv("RULE_REPO_BRANCH", legacyBranch),
-		GitHubToken: os.Getenv("GITHUB_TOKEN"), GitLabToken: os.Getenv("GITLAB_TOKEN"), GitLabBaseURL: strings.TrimRight(getenv("GITLAB_BASE_URL", "https://gitlab.com"), "/"),
-		UpstreamRepo: getenv("UPSTREAM_REPO", "Aethersailor/Custom_OpenClash_Rules"), UpstreamBranch: getenv("UPSTREAM_BRANCH", "main"), ProxyPolicyGroup: getenv("PROXY_POLICY_GROUP", "🚀 手动选择"),
+			PublicRuleRepoProvider: publicProvider, PublicRuleRepoProject: getenv("PUBLIC_RULE_REPO_PROJECT", getenv("RULE_REPO_PROJECT", legacyRepo)), PublicRuleRepoBranch: getenv("PUBLIC_RULE_REPO_BRANCH", getenv("RULE_REPO_BRANCH", legacyBranch)),
+		GitHubToken: os.Getenv("GITHUB_TOKEN"), GitLabToken: os.Getenv("GITLAB_TOKEN"), PublicGitLabToken: getenv("PUBLIC_GITLAB_TOKEN", os.Getenv("GITLAB_TOKEN")), GitLabBaseURL: strings.TrimRight(getenv("GITLAB_BASE_URL", "https://gitlab.com"), "/"),
+		PublicGitLabBaseURL: strings.TrimRight(getenv("PUBLIC_GITLAB_BASE_URL", getenv("GITLAB_BASE_URL", "https://gitlab.com")), "/"),
+		UpstreamRepo:        getenv("UPSTREAM_REPO", "Aethersailor/Custom_OpenClash_Rules"), UpstreamBranch: getenv("UPSTREAM_BRANCH", "main"), ProxyPolicyGroup: getenv("PROXY_POLICY_GROUP", "🚀 手动选择"),
 		SyncCron: getenv("SYNC_CRON", "0 3 * * *"), DataDir: getenv("DATA_DIR", "/app/data"), GeoIPAPIURL: getenv("GEOIP_API_URL", "https://ipwho.is/{ip}"),
 		DoHEnabled: legacyEnabled, DoHAPIURLs: legacyURLs, DoHTimeout: dnsTimeout, DoHCacheSize: dnsCacheSize,
 		DomesticDNSEnabled: domesticEnabled, DomesticDNSURLs: domesticURLs, ForeignDNSEnabled: foreignEnabled, ForeignDNSURLs: foreignURLs,

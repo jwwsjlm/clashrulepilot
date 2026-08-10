@@ -24,6 +24,11 @@ type AccessReport struct {
 	CheckedAt     time.Time
 }
 
+type FileChange struct {
+	Content []byte
+	Delete  bool
+}
+
 type Repository interface {
 	EnsureRepo(context.Context) error
 	CheckAccess(context.Context) AccessReport
@@ -36,4 +41,12 @@ type Repository interface {
 	Branch() string
 	WebURL() string
 	RawURL(string) string
+}
+
+// ExtendedRepository adds atomic create/update/delete and tree listing support.
+// Keeping it separate preserves compatibility with lightweight repository fakes.
+type ExtendedRepository interface {
+	Repository
+	CommitChanges(context.Context, map[string]FileChange, string, string) (string, error)
+	ListFiles(context.Context, string, string) ([]string, error)
 }

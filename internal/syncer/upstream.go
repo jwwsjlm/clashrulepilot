@@ -23,6 +23,24 @@ type Client struct {
 	HTTP                *http.Client
 }
 
+func (c *Client) HeadRevision(ctx context.Context) (string, error) {
+	parts := strings.SplitN(c.Repo, "/", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("UPSTREAM_REPO must be owner/repository")
+	}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", parts[0], parts[1], c.Branch)
+	var commit struct {
+		SHA string `json:"sha"`
+	}
+	if err := c.get(ctx, endpoint, &commit); err != nil {
+		return "", err
+	}
+	if commit.SHA == "" {
+		return "", fmt.Errorf("upstream commit SHA is empty")
+	}
+	return commit.SHA, nil
+}
+
 func New(repo, branch, token string) *Client {
 	retry := retryablehttp.NewClient()
 	retry.RetryMax = 4
@@ -50,7 +68,7 @@ func (c *Client) FetchRuleYAML(ctx context.Context) (map[string][]byte, map[stri
 		if f.Type != "file" || !strings.HasSuffix(strings.ToLower(f.Name), ".yaml") {
 			continue
 		}
-		if !(strings.HasPrefix(f.Name, "Custom_Direct_") || strings.HasPrefix(f.Name, "Custom_Proxy_") || f.Name == "Custom_Port_Direct.yaml") {
+		if !isDomainRuleFile(f.Name) {
 			continue
 		}
 		b, err := c.bytes(ctx, f.DownloadURL)
@@ -64,6 +82,11 @@ func (c *Client) FetchRuleYAML(ctx context.Context) (map[string][]byte, map[stri
 		return nil, nil, fmt.Errorf("no matching upstream YAML rules found")
 	}
 	return out, shas, nil
+}
+
+func isDomainRuleFile(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasSuffix(lower, "_domain.yaml") && !strings.HasSuffix(lower, ".mrs") && !strings.HasSuffix(lower, ".list")
 }
 
 func (c *Client) get(ctx context.Context, endpoint string, result any) error {

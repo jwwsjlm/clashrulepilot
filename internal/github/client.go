@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -172,7 +173,15 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 	if len(expectedRevisions) > 0 {
 		expectedRevision = expectedRevisions[0]
 	}
-	if len(files) == 0 {
+	changes := make(map[string]repository.FileChange, len(files))
+	for file, data := range files {
+		changes[file] = repository.FileChange{Content: data}
+	}
+	return c.CommitChanges(ctx, changes, message, expectedRevision)
+}
+
+func (c *Client) CommitChanges(ctx context.Context, changes map[string]repository.FileChange, message, expectedRevision string) (string, error) {
+	if len(changes) == 0 {
 		return "", nil
 	}
 	ref, _, err := c.api.Git.GetRef(ctx, c.owner, c.repo, "heads/"+c.branch)
@@ -191,8 +200,13 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 		return "", err
 	}
 
-	entries := make([]*gh.TreeEntry, 0, len(files))
-	for name, data := range files {
+	entries := make([]*gh.TreeEntry, 0, len(changes))
+	for name, change := range changes {
+		if change.Delete {
+			entries = append(entries, &gh.TreeEntry{Path: gh.Ptr(name), Mode: gh.Ptr("100644"), Type: gh.Ptr("blob"), SHA: nil})
+			continue
+		}
+		data := change.Content
 		encoded := base64.StdEncoding.EncodeToString(data)
 		blob, _, err := c.api.Git.CreateBlob(ctx, c.owner, c.repo, gh.Blob{Content: &encoded, Encoding: gh.Ptr("base64")})
 		if err != nil {
@@ -224,6 +238,24 @@ func (c *Client) CommitFiles(ctx context.Context, files map[string][]byte, messa
 		return "", fmt.Errorf("update branch: %w", err)
 	}
 	return created.GetSHA(), nil
+}
+
+func (c *Client) ListFiles(ctx context.Context, directory, revision string) ([]string, error) {
+	if strings.TrimSpace(revision) == "" {
+		revision = c.branch
+	}
+	_, entries, _, err := c.api.Repositories.GetContents(ctx, c.owner, c.repo, strings.Trim(directory, "/"), &gh.RepositoryContentGetOptions{Ref: revision})
+	if err != nil {
+		return nil, err
+	}
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry != nil && entry.GetType() == "file" {
+			files = append(files, entry.GetPath())
+		}
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 func isStatus(err error, status int) bool {

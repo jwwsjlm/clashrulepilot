@@ -45,6 +45,14 @@ ClashRulePilot 生成的 `personal-overwrite.ini` 使用 `[YAML]` 和 `+rules` �
 
 ## OpenClash 覆写自检边界
 
+生产环境的推荐分层是：GitHub `jwwsjlm/clashrulepilot` 仅保存源码；GitLab 私有项目 `someme/clashrulepilot-rules-private` 保存个人规则权威源；GitLab 公共项目 `someme/clashrulepilot-rules` 发布 OpenClash 文件。远程覆写使用公共项目地址：
+
+```text
+https://gitlab.com/someme/clashrulepilot-rules/-/raw/main/openclash/personal-overwrite.ini
+```
+
+公共镜像由 GitHub Actions 每天北京时间 03:00 同步生成，容器保持 `SYNC_UPSTREAM=false`，避免与 Workflow 同时写入上游文件。
+
 Bot 状态页中的 **🧪 OpenClash 覆写自检** 只检查发布侧，主要验证：
 
 - GitHub/GitLab 仓库、目标分支和 Raw 文件是否可访问；
