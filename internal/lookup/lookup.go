@@ -264,7 +264,7 @@ func (i *Inspector) inspectAddresses(ctx context.Context, name string, addrs []n
 }
 
 func (i *Inspector) hasGroups() bool {
-	return !i.legacy && (len(i.doh.Domestic.Endpoints) > 0 || len(i.doh.Foreign.Endpoints) > 0)
+	return !i.legacy && ((i.doh.Domestic.Enabled && len(i.doh.Domestic.Endpoints) > 0) || (i.doh.Foreign.Enabled && len(i.doh.Foreign.Endpoints) > 0))
 }
 
 func (i *Inspector) resolveGroups(ctx context.Context, name string) (DNSGroupResult, DNSGroupResult) {

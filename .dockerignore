@@ -5,3 +5,8 @@ bin
 dist
 runtime
 .idea
+config-backup
+config-ready
+kernel
+log
+data

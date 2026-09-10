@@ -95,7 +95,7 @@ func New(service *app.Service, cfg config.Config) (*Bot, error) {
 }
 
 func (b *Bot) Run(ctx context.Context) {
-	me, err := b.api.GetMe(ctx)
+	me, err := getMeWithRetry(ctx, 5, time.Second, b.api.GetMe)
 	if err != nil {
 		log.Printf("telegram startup check failed: %v", err)
 		return
@@ -105,6 +105,40 @@ func (b *Bot) Run(ctx context.Context) {
 	b.mu.Unlock()
 	log.Printf("telegram connected bot=@%s id=%d allowlist=%v", me.Username, me.ID, b.cfg.Allowlist)
 	b.api.Start(ctx)
+}
+
+func getMeWithRetry(ctx context.Context, attempts int, delay time.Duration, getMe func(context.Context) (*models.User, error)) (*models.User, error) {
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		me, err := getMe(ctx)
+		if err == nil {
+			return me, nil
+		}
+		lastErr = err
+		if attempt == attempts {
+			break
+		}
+		log.Printf("telegram startup check failed attempt=%d/%d: %v", attempt, attempts, err)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if delay < 8*time.Second {
+			delay *= 2
+		}
+	}
+	return nil, lastErr
 }
 
 func (b *Bot) Notify(chatID int64, message string) {
@@ -134,7 +168,7 @@ func (b *Bot) handle(ctx context.Context, _ *tgbot.Bot, item *models.Update) {
 	defer unlock()
 	text := strings.TrimSpace(item.Message.Text)
 	b.bindSessionOwner(item.Message.Chat.ID, item.Message.From.ID)
-	log.Printf("telegram message accepted update_id=%d from=%d chat=%d text=%q", item.ID, item.Message.From.ID, item.Message.Chat.ID, text)
+	log.Printf("telegram message accepted update_id=%d from=%d chat=%d text_len=%d", item.ID, item.Message.From.ID, item.Message.Chat.ID, len(text))
 	if b.handlePendingText(ctx, item.Message.Chat.ID, text) {
 		return
 	}
@@ -388,7 +422,11 @@ func (b *Bot) commitPending(ctx context.Context, chatID, userID int64, p *pendin
 	if len(result.Related) > 0 {
 		extra = fmt.Sprintf("\n\n⚠️ 已保留 %d 条相反动作的父子/重叠规则。生成的显式规则会按精确度排序，更具体的规则优先。", len(result.Related))
 	}
-	b.sendTarget(ctx, chatID, progress, fmt.Sprintf("✅ 规则已提交\n\n动作：%s\n规则：%s\n覆盖：%s\ncommit：%s%s", actionText(p.Action), rules.Token(toRule(p, userID)), coverageText(p), short(result.Commit), extra), homeMenu())
+	publishStatus := "公共镜像：已同步"
+	if result.PublicPending {
+		publishStatus = "⚠️ 私有仓库已提交；公共镜像待后台重试"
+	}
+	b.sendTarget(ctx, chatID, progress, fmt.Sprintf("✅ 规则已提交\n\n动作：%s\n规则：%s\n覆盖：%s\ncommit：%s\n%s%s", actionText(p.Action), rules.Token(toRule(p, userID)), coverageText(p), short(result.Commit), publishStatus, extra), homeMenu())
 }
 
 func (b *Bot) startAddMode(ctx context.Context, chatID int64, action rules.Action) {
@@ -789,7 +827,11 @@ func (b *Bot) confirmRemoval(ctx context.Context, chatID int64, p *pending) {
 		b.sendTarget(ctx, chatID, progress, fmt.Sprintf("📤 仓库暂时不可用，删除操作已加入待提交队列。\n队列编号：%s\n\n规则尚未从 OpenClash 生效文件中删除。", short(result.QueueID)), homeMenu())
 		return
 	}
-	b.sendTarget(ctx, chatID, progress, fmt.Sprintf("✅ 删除完成\n域名：%s\n删除规则：%d 条\ncommit：%s", p.Domain, result.Changed, short(result.Commit)), homeMenu())
+	publishStatus := "公共镜像：已同步"
+	if result.PublicPending {
+		publishStatus = "⚠️ 私有仓库已提交；公共镜像待后台重试"
+	}
+	b.sendTarget(ctx, chatID, progress, fmt.Sprintf("✅ 删除完成\n域名：%s\n删除规则：%d 条\ncommit：%s\n%s", p.Domain, result.Changed, short(result.Commit), publishStatus), homeMenu())
 }
 
 func rulesForDomain(store rules.Store, domainName string) []rules.Rule {
@@ -935,14 +977,6 @@ func (b *Bot) queryTarget(ctx context.Context, chatID int64, domainName string, 
 	}
 	rows := [][]button{}
 	canWrite := !b.service.ReadOnly()
-	if canWrite && len(result.Personal) == 0 {
-		if hasProxy {
-			rows = append(rows, []button{{Text: "🟢 覆写为个人直连", Data: "override:direct"}})
-		}
-		if hasDirect {
-			rows = append(rows, []button{{Text: "🔴 覆写为个人代理", Data: "override:proxy"}})
-		}
-	}
 	rows = append(rows, []button{{Text: "🏠 主菜单", Data: "nav:home:edit"}})
 	if len(result.Network.GeoIPs) > 0 {
 		rows = append(rows, []button{{Text: "📍 查看全部 IP 归属", Data: "dns:details:all"}})
@@ -953,16 +987,10 @@ func (b *Bot) queryTarget(ctx context.Context, chatID int64, domainName string, 
 	if len(result.Network.Foreign.A)+len(result.Network.Foreign.AAAA) > 0 {
 		rows = append(rows, []button{{Text: "🌍 查看国外 DNS 详情", Data: "dns:details:foreign"}})
 	}
-	if canWrite && suggestionDecision.ButtonAction != "" {
-		upstreamAlreadyHasAction := len(result.Personal) == 0 && ((suggestionDecision.ButtonAction == rules.Direct && hasDirect) || (suggestionDecision.ButtonAction == rules.Proxy && hasProxy))
-		if !upstreamAlreadyHasAction {
-			rows = append(rows, []button{{Text: suggestionDecision.ButtonText, Data: "suggest:" + string(suggestionDecision.ButtonAction)}})
-		}
-	} else if canWrite && len(result.Personal) == 0 && suggestionDecision.Kind == "both" {
-		rows = append(rows, []button{
-			{Text: "🟢 添加直连（需确认）", Data: "suggest:direct"},
-			{Text: "🔴 添加代理（需确认）", Data: "suggest:proxy"},
-		})
+	if canWrite && len(result.Personal) == 0 {
+		rows = append(rows, queryActionButtons(suggestionDecision, hasDirect, hasProxy))
+	} else if canWrite && suggestionDecision.ButtonAction != "" {
+		rows = append(rows, []button{{Text: suggestionDecision.ButtonText, Data: "suggest:" + string(suggestionDecision.ButtonAction)}})
 	}
 	if canWrite && len(result.Personal) > 0 {
 		rows = append(rows, []button{{Text: "🗑️ 删除匹配的个人规则", Data: "query:remove"}})
@@ -1138,6 +1166,9 @@ func (b *Bot) sync(ctx context.Context, chatID int64) {
 	}
 	if result.Commit != "" {
 		msg += fmt.Sprintf("\n镜像 %d 个文件，commit=%s", result.Changed, short(result.Commit))
+	}
+	if result.PublicPending {
+		msg += "\n⚠️ 私有仓库已更新；公共镜像待后台重试"
 	}
 	state := b.service.SyncStatus()
 	if state.Shared {
@@ -1368,6 +1399,10 @@ func (b *Bot) helpText() string {
 		"④ 目标配置选择「所有配置文件」（对应 config=all），启用模块并保存；config 留空会导致覆写永不生效。\n" +
 		"⑤ 点击模块刷新后，重启 OpenClash。可在 服务 → OpenClash → 配置管理 → 当前配置 → 下载运行配置，检查 rules 顶部是否出现个人规则。\n" +
 		"⑥ 若同时存在其他会修改 rules 的覆写模块，请让个人模块在其之后执行（覆写 order 数值越小越晚执行），确保个人 +rules 位于最前面。\n\n" +
+		"📗 Clash/Mihomo 标准规则集\n" +
+		"规则仓库同时发布 My_Direct_Classical.yaml 和 My_Proxy_Classical.yaml。普通 Clash/Mihomo 在 rule-providers 中使用 behavior=classical、format=yaml，并通过 RULE-SET 指定 DIRECT 或代理策略组。Provider 文件是标准 YAML，不包含 [YAML] 段头。\n\n" +
+		"🧹 策略组清理脚本\n" +
+		"如果重度分流模板让“🚀 手动选择”同时显示单节点和节点组，可下载 openclash_custom_overwrite.sh 放到路由器 /etc/openclash/custom/。脚本只保留节点组引用，不修改其他策略组；Ruby/YAML 依赖缺失时会跳过且不阻断启动。\n\n" +
 		"🧠 规则原理\n" +
 		"个人覆写文件使用 [YAML] 段和 +rules，将个人规则插入订阅规则之前；Mihomo 按 rules 从上到下匹配，因此更具体、排在前面的个人规则可覆盖上游规则。\n\n" +
 		"🧩 匹配方式\n" +
@@ -1398,7 +1433,7 @@ func (b *Bot) repo(ctx context.Context, chatID int64) {
 }
 
 func (b *Bot) repoTarget(ctx context.Context, chatID int64, target *models.Message) {
-	b.sendTarget(ctx, chatID, target, fmt.Sprintf("规则仓库\n%s\n\n个人覆写：\n%s", b.service.RepoWebURL(), b.service.RepoRawURL("openclash/personal-overwrite.ini")), homeEditMenu())
+	b.sendTarget(ctx, chatID, target, fmt.Sprintf("规则仓库\n%s\n\nSublink Pro/Subconverter 远程 ACL：\n%s\n\n纯文本直连 ACL：\n%s\n\n纯文本代理 ACL：\n%s\n\nOpenClash 远程覆写：\n%s\n\nClash/Mihomo 直连 Provider：\n%s\n\nClash/Mihomo 代理 Provider：\n%s\n\n策略组清理脚本：\n%s", b.service.RepoWebURL(), b.service.RepoRawURL("clash/Custom_Mihomo_Optimized.ini"), b.service.RepoRawURL("rules/acl/Custom_Direct.list"), b.service.RepoRawURL("rules/acl/Custom_Proxy.list"), b.service.RepoRawURL("openclash/personal-overwrite.ini"), b.service.RepoRawURL("rules/personal/My_Direct_Classical.yaml"), b.service.RepoRawURL("rules/personal/My_Proxy_Classical.yaml"), b.service.RepoRawURL("openclash/openclash_custom_overwrite.sh")), homeEditMenu())
 }
 
 func (b *Bot) clear(id int64) { b.mu.Lock(); delete(b.sessions, id); b.mu.Unlock() }
@@ -2046,11 +2081,14 @@ func smartSuggestion(personal []rules.Rule, report lookup.Report) suggestionDeci
 	if mixed {
 		matchNote = fmt.Sprintf("个人规则存在父子域名重叠，当前按最具体的 %s 规则生效。", current)
 	}
+	decision.ButtonAction = opposite
+	decision.ButtonText = switchButtonText(opposite, "（可选）")
 
 	switch geoKind {
 	case "direct":
 		if effective.Action == rules.Direct {
-			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆，当前个人规则已经是%s，无需重复添加，建议保持现有规则。%s", current, matchNote)
+			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆，当前个人规则已经是%s，无需重复添加，建议保持现有规则。若确实需要调整，仍可切换为%s（不建议）。%s", current, oppositeText, matchNote)
+			decision.ButtonText = switchButtonText(opposite, "（不建议）")
 		} else {
 			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆，当前个人规则为%s，与当前地域判断相反。若访问确实需要直连，可切换为%s；CDN 位置可能变化，请结合实际访问确认。%s", current, actionText(rules.Direct), matchNote)
 			decision.ButtonAction = rules.Direct
@@ -2059,8 +2097,7 @@ func smartSuggestion(personal []rules.Rule, report lookup.Report) suggestionDeci
 	case "proxy":
 		if effective.Action == rules.Proxy {
 			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆以外，通常适合%s；当前个人规则已经是%s，无需重复添加，建议保持现有规则。若确实需要调整，可切换为%s（不建议）。%s", actionText(rules.Proxy), current, oppositeText, matchNote)
-			decision.ButtonAction = rules.Direct
-			decision.ButtonText = "🟢 切换为直连（不建议）"
+			decision.ButtonText = switchButtonText(opposite, "（不建议）")
 		} else {
 			decision.Text = fmt.Sprintf("💡 建议：真实 IP 均在中国大陆以外，通常适合%s；当前个人规则为%s。若访问确实需要代理，可切换为%s。CDN 位置可能变化，请结合实际访问确认。%s", actionText(rules.Proxy), current, actionText(rules.Proxy), matchNote)
 			decision.ButtonAction = rules.Proxy
@@ -2068,10 +2105,8 @@ func smartSuggestion(personal []rules.Rule, report lookup.Report) suggestionDeci
 		}
 	case "both":
 		decision.Text = fmt.Sprintf("💡 建议：当前域名同时解析到中国大陆和境外地址，可能存在 CDN 分流；当前个人规则为%s，建议先保持现有规则，不根据单次解析自动改分组。必要时可切换为%s。%s", current, oppositeText, matchNote)
-		decision.ButtonAction = opposite
-		decision.ButtonText = switchButtonText(opposite, "（可选）")
 	default:
-		decision.Text = fmt.Sprintf("💡 建议：暂时无法根据真实 IP 判断分组；当前个人规则为%s，建议保持现有规则。%s", current, matchNote)
+		decision.Text = fmt.Sprintf("💡 建议：暂时无法根据真实 IP 判断分组；当前个人规则为%s，建议保持现有规则。必要时仍可切换为%s。%s", current, oppositeText, matchNote)
 	}
 	return decision
 }
@@ -2081,6 +2116,25 @@ func switchButtonText(action rules.Action, suffix string) string {
 		return "🟢 切换为直连" + suffix
 	}
 	return "🔴 切换为代理" + suffix
+}
+
+func queryActionButtons(decision suggestionDecision, hasDirect, hasProxy bool) []button {
+	directText, proxyText := "🟢 添加为直连", "🔴 添加为代理"
+	if hasProxy {
+		directText = "🟢 覆写为个人直连"
+	}
+	if hasDirect {
+		proxyText = "🔴 覆写为个人代理"
+	}
+	if decision.ButtonAction == rules.Direct {
+		directText += " · ⭐ 推荐"
+	} else if decision.ButtonAction == rules.Proxy {
+		proxyText += " · ⭐ 推荐"
+	}
+	return []button{
+		{Text: directText, Data: "suggest:direct"},
+		{Text: proxyText, Data: "suggest:proxy"},
+	}
 }
 
 func effectivePersonalRule(personal []rules.Rule) (rules.Rule, bool) {

@@ -128,6 +128,17 @@ func TestFakeIPSkipsGeoIPRequest(t *testing.T) {
 	}
 }
 
+func TestDisabledDNSGroupsKeepLocalAddresses(t *testing.T) {
+	inspector := New("", DoHConfig{
+		Domestic: DNSGroupConfig{Enabled: false, Endpoints: []string{"https://domestic.example/dns-query"}},
+		Foreign:  DNSGroupConfig{Enabled: false, Endpoints: []string{"https://foreign.example/dns-query"}},
+	})
+	report := inspector.inspectAddresses(context.Background(), "example.com", []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}})
+	if report.DNSSource != "local" || len(report.A) != 1 || report.A[0] != "8.8.8.8" {
+		t.Fatalf("disabled DNS groups discarded local resolution: %+v", report)
+	}
+}
+
 func TestFakeIPFallsBackToDoHAndGeoIP(t *testing.T) {
 	var dohRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

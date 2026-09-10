@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -31,6 +33,14 @@ import (
 )
 
 const personalPath = "data/personal_rules.json"
+
+var errPersonalRulesMissing = errors.New("personal rules file does not exist")
+
+//go:embed assets/openclash_custom_overwrite.sh
+var openClashCustomOverwrite []byte
+
+//go:embed assets/Custom_Mihomo_Optimized.ini
+var customMihomoOptimizedTemplate []byte
 
 type Service struct {
 	cfg            config.Config
@@ -59,6 +69,7 @@ type Service struct {
 	runCtxMu       sync.RWMutex
 	runCtx         context.Context
 	syncTask       func(context.Context) (Result, error)
+	publicPending  atomic.Bool
 }
 type ConflictError struct{ Existing rules.Rule }
 type ReadOnlyError struct{ Reason string }
@@ -75,13 +86,14 @@ func (e *ConflictError) Error() string {
 }
 
 type Result struct {
-	Commit       string
-	Changed      int
-	Store        rules.Store
-	IndexChanged bool
-	Related      []rules.Rule
-	Queued       bool
-	QueueID      string
+	Commit        string
+	Changed       int
+	Store         rules.Store
+	IndexChanged  bool
+	Related       []rules.Rule
+	Queued        bool
+	QueueID       string
+	PublicPending bool
 }
 
 type QueryTiming struct {
@@ -186,6 +198,13 @@ func (s *Service) publishRepo() repository.Repository {
 	if s.publicRepo != nil {
 		return s.publicRepo
 	}
+	if s.privateRepo != nil {
+		return s.privateRepo
+	}
+	return s.repo
+}
+
+func (s *Service) sourceRepo() repository.Repository {
 	if s.privateRepo != nil {
 		return s.privateRepo
 	}
@@ -300,6 +319,9 @@ func (s *Service) StartWorkers(ctx context.Context) {
 		if err := s.ProcessQueue(run); err != nil {
 			log.Printf("mutation queue processing failed: %v", err)
 		}
+		if err := s.retryPublicPublish(run); err != nil {
+			log.Printf("public mirror retry failed: %v", err)
+		}
 	})
 }
 
@@ -348,33 +370,67 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		log.Printf("%s repository unavailable and no personal cache exists; continuing in read-only mode: %s", s.cfg.RuleRepoProvider, access.Error)
 		return nil
 	}
-	if err := s.RefreshStore(ctx); err != nil {
-		log.Printf("personal rules refresh failed during bootstrap: %v", err)
+	refreshErr := s.RefreshStore(ctx)
+	missing := errors.Is(refreshErr, errPersonalRulesMissing)
+	if refreshErr != nil && !missing {
+		log.Printf("personal rules refresh failed during bootstrap; refusing to overwrite remote data: %v", refreshErr)
+		if _, cacheErr := s.LoadStore(ctx); cacheErr != nil {
+			access.Writable = false
+			access.Error = "personal_rules.json 无法读取或解析：" + refreshErr.Error()
+			s.accessMu.Lock()
+			s.access = access
+			s.accessMu.Unlock()
+			if s.state != nil {
+				_ = s.state.SaveAccess(access)
+			}
+		}
+		return nil
 	}
-	store, err := s.LoadStore(ctx)
-	if err != nil {
+	var store rules.Store
+	if missing {
+		if !access.Writable {
+			log.Printf("personal rules file is missing and repository is read-only; initialization skipped")
+			return nil
+		}
 		store = rules.Empty()
-		s.setStoreSnapshot(store, access.Revision, time.Now().UTC())
-	}
-	if !access.Writable {
-		return nil
-	}
-	files, err := s.desiredFiles(ctx, &store, nil, nil)
-	if err != nil {
-		return err
-	}
-	sha, err := s.commitChanged(ctx, files, "chore: initialize ClashRulePilot rules", access.Revision)
-	if err != nil {
-		log.Printf("rule repository bootstrap commit unavailable; continuing read-only until retry: %v", err)
-		return nil
-	}
-	if sha != "" {
-		s.setStoreSnapshot(store, sha, time.Now().UTC())
-		if err := s.persistStoreState(store, sha); err != nil {
-			log.Printf("persist bootstrap personal rules state: %v", err)
+	} else {
+		var err error
+		store, err = s.LoadStore(ctx)
+		if err != nil {
+			log.Printf("personal rules cache unavailable during bootstrap; initialization skipped: %v", err)
+			return nil
 		}
 	}
-	s.Preflight(ctx)
+
+	sourceRevision := s.currentStoreRevision()
+	if sourceRevision == "" {
+		sourceRevision = access.Revision
+	}
+	if access.Writable {
+		files, err := s.desiredFiles(ctx, &store, nil, nil)
+		if err != nil {
+			return err
+		}
+		sha, err := s.commitChanged(ctx, files, "chore: initialize ClashRulePilot rules", sourceRevision)
+		if err != nil {
+			log.Printf("rule repository bootstrap commit unavailable; continuing read-only until retry: %v", err)
+			return nil
+		}
+		if sha != "" {
+			sourceRevision = sha
+		}
+		s.setStoreSnapshot(store, sourceRevision, time.Now().UTC())
+		if err := s.persistStoreState(store, sourceRevision); err != nil {
+			log.Printf("persist bootstrap personal rules state: %v", err)
+		}
+		s.Preflight(ctx)
+	}
+	if err := s.publishCurrentPublic(ctx, store, sourceRevision); err != nil {
+		s.publicPending.Store(true)
+		log.Printf("public mirror update pending after bootstrap: %v", err)
+	} else {
+		s.publicPending.Store(false)
+	}
 	return nil
 }
 
@@ -460,7 +516,8 @@ func (s *Service) refreshStore(ctx context.Context) error {
 		return err
 	}
 	if len(b) == 0 {
-		b, _ = rules.Encode(rules.Empty())
+		s.markStoreUnavailable(errPersonalRulesMissing)
+		return errPersonalRulesMissing
 	}
 	store, err := rules.Decode(b)
 	if err != nil {
@@ -566,10 +623,13 @@ func (s *Service) AddRule(ctx context.Context, r rules.Rule, force bool) (Result
 		if cacheErr := s.persistStoreState(store, sha); cacheErr != nil {
 			log.Printf("personal rules state write failed after add: %v", cacheErr)
 		}
-		if err := s.publishCurrentPublic(ctx, store, sha); err != nil {
-			log.Printf("public mirror update pending after add: %v", err)
+		publishErr := s.publishCurrentPublic(ctx, store, sha)
+		publicPending := publishErr != nil
+		s.publicPending.Store(publicPending)
+		if publishErr != nil {
+			log.Printf("public mirror update pending after add: %v", publishErr)
 		}
-		return Result{Commit: sha, Changed: 1, Store: store, Related: related}, nil
+		return Result{Commit: sha, Changed: 1, Store: store, Related: related, PublicPending: publicPending}, nil
 	}
 	return Result{}, repository.ErrConflict
 }
@@ -615,10 +675,13 @@ func (s *Service) RemoveRule(ctx context.Context, domainName string, match *rule
 		}
 		s.setStoreSnapshot(store, sha, time.Now().UTC())
 		_ = s.persistStoreState(store, sha)
-		if err := s.publishCurrentPublic(ctx, store, sha); err != nil {
-			log.Printf("public mirror update pending after remove: %v", err)
+		publishErr := s.publishCurrentPublic(ctx, store, sha)
+		publicPending := publishErr != nil
+		s.publicPending.Store(publicPending)
+		if publishErr != nil {
+			log.Printf("public mirror update pending after remove: %v", publishErr)
 		}
-		return Result{Commit: sha, Changed: n, Store: store}, nil
+		return Result{Commit: sha, Changed: n, Store: store, PublicPending: publicPending}, nil
 	}
 	return Result{}, repository.ErrConflict
 }
@@ -734,23 +797,31 @@ func (s *Service) applyQueued(ctx context.Context, item runtimestate.Mutation) e
 	}
 	s.setStoreSnapshot(store, sha, time.Now().UTC())
 	_ = s.persistStoreState(store, sha)
-	if err := s.publishCurrentPublic(ctx, store, sha); err != nil {
-		log.Printf("public mirror update pending after queued mutation: %v", err)
+	publishErr := s.publishCurrentPublic(ctx, store, sha)
+	publicPending := publishErr != nil
+	s.publicPending.Store(publicPending)
+	if publishErr != nil {
+		log.Printf("public mirror update pending after queued mutation: %v", publishErr)
 	}
 	_ = s.state.DeleteMutation(item.ID)
-	s.sendNotice(item.ChatID, fmt.Sprintf("✅ 排队规则已提交\n变更：%d 条\ncommit：%s", changed, shortSHA(sha)))
+	status := "\n公共镜像：已同步"
+	if publicPending {
+		status = "\n⚠️ 私有仓库已提交，公共镜像待后台重试"
+	}
+	s.sendNotice(item.ChatID, fmt.Sprintf("✅ 排队规则已提交\n变更：%d 条\ncommit：%s%s", changed, shortSHA(sha), status))
 	return nil
 }
 
 func (s *Service) publishCurrentPublic(ctx context.Context, store rules.Store, sourceCommit string) error {
-	if s.publicRepo == nil || s.privateRepo == nil {
+	sourceRepo := s.sourceRepo()
+	if s.publicRepo == nil || sourceRepo == nil {
 		return nil
 	}
 	revision := sourceCommit
 	if revision == "" {
-		revision, _ = s.privateRepo.HeadRevision(ctx)
+		revision, _ = sourceRepo.HeadRevision(ctx)
 	}
-	extended, ok := s.privateRepo.(repository.ExtendedRepository)
+	extended, ok := sourceRepo.(repository.ExtendedRepository)
 	if !ok {
 		return nil
 	}
@@ -763,13 +834,33 @@ func (s *Service) publishCurrentPublic(ctx context.Context, store rules.Store, s
 		if !strings.HasPrefix(p, "rules/upstream/") {
 			continue
 		}
-		b, _, err := s.privateRepo.GetFileAtRevision(ctx, p, revision)
+		b, _, err := sourceRepo.GetFileAtRevision(ctx, p, revision)
 		if err != nil {
 			return err
 		}
 		upstream[strings.TrimPrefix(p, "rules/upstream/")] = b
 	}
-	return s.publishPublic(ctx, store, upstream, sourceCommit)
+	return s.publishPublic(ctx, store, upstream, revision)
+}
+
+func (s *Service) retryPublicPublish(ctx context.Context) error {
+	if !s.publicPending.Load() {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStore(ctx); err != nil {
+		return err
+	}
+	store, err := s.LoadStore(ctx)
+	if err != nil {
+		return err
+	}
+	err = s.publishCurrentPublic(ctx, store, s.currentStoreRevision())
+	if err == nil {
+		s.publicPending.Store(false)
+	}
+	return err
 }
 
 func (s *Service) deferMutation(item runtimestate.Mutation, err error) error {
@@ -864,10 +955,14 @@ func (s *Service) syncOnce(ctx context.Context) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.setSyncStage("下载并发布上游规则")
+	if err := s.refreshStore(ctx); err != nil {
+		return Result{}, err
+	}
 	store, err := s.LoadStore(ctx)
 	if err != nil {
 		return Result{}, err
 	}
+	revision := s.currentStoreRevision()
 	up, shas, err := s.upstream.FetchRuleYAML(ctx)
 	if err != nil {
 		return Result{}, err
@@ -880,7 +975,8 @@ func (s *Service) syncOnce(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	metaBytes, _, _ := s.repo.GetFile(ctx, "metadata/upstream.json")
+	sourceRepo := s.sourceRepo()
+	metaBytes, _, _ := sourceRepo.GetFileAtRevision(ctx, "metadata/upstream.json", revision)
 	var oldMeta struct {
 		Files map[string]string `json:"files"`
 	}
@@ -899,18 +995,32 @@ func (s *Service) syncOnce(ctx context.Context) (Result, error) {
 		metaBytes = append(meta, '\n')
 	}
 	files["metadata/upstream.json"] = metaBytes
-	revision, _ := s.repo.HeadRevision(ctx)
-	sha, err := s.commitChangedTo(ctx, s.privateRepo, files, "chore: sync upstream rules", revision, "rules/upstream/")
+	sha, err := s.commitChangedTo(ctx, sourceRepo, files, "chore: sync upstream rules", revision, "rules/upstream/")
 	if err != nil {
 		return Result{}, err
 	}
 	if sha == "" {
-		sha, _ = s.privateRepo.HeadRevision(ctx)
+		head, headErr := sourceRepo.HeadRevision(ctx)
+		if headErr != nil {
+			return Result{}, headErr
+		}
+		if revision != "" && head != revision {
+			return Result{}, repository.ErrConflict
+		}
+		sha = head
+	} else {
+		s.setStoreSnapshot(store, sha, time.Now().UTC())
+		if err := s.persistStoreState(store, sha); err != nil {
+			log.Printf("persist personal rules state after upstream sync: %v", err)
+		}
 	}
-	if err := s.publishPublic(ctx, store, up, sha); err != nil {
-		return Result{}, fmt.Errorf("private source committed but public mirror publish pending: %w", err)
+	publishErr := s.publishPublic(ctx, store, up, sha)
+	publicPending := publishErr != nil
+	s.publicPending.Store(publicPending)
+	if publishErr != nil {
+		log.Printf("private source committed but public mirror publish pending: %v", publishErr)
 	}
-	return Result{Commit: sha, Changed: len(up), Store: store, IndexChanged: indexChanged}, indexErr
+	return Result{Commit: sha, Changed: len(up), Store: store, IndexChanged: indexChanged, PublicPending: publicPending}, indexErr
 }
 
 // publishPublic renders the current private source into the public OpenClash mirror.
@@ -925,9 +1035,17 @@ func (s *Service) publishPublic(ctx context.Context, store rules.Store, upstream
 	}
 	delete(files, personalPath)
 	delete(files, "metadata/upstream.json")
-	upstreamCommit, _ := s.upstream.HeadRevision(ctx)
+	upstreamCommit := ""
+	if s.upstream != nil {
+		upstreamCommit, _ = s.upstream.HeadRevision(ctx)
+	}
+	sourceRepo := s.sourceRepo()
+	sourceRepository := ""
+	if sourceRepo != nil {
+		sourceRepository = sourceRepo.Owner() + "/" + sourceRepo.Repo()
+	}
 	distribution, _ := json.MarshalIndent(map[string]any{
-		"source_repository":   s.privateRepo.Owner() + "/" + s.privateRepo.Repo(),
+		"source_repository":   sourceRepository,
 		"source_commit":       sourceCommit,
 		"upstream_repository": s.cfg.UpstreamRepo,
 		"upstream_commit":     upstreamCommit,
@@ -948,7 +1066,7 @@ func (s *Service) publishPublic(ctx context.Context, store rules.Store, upstream
 		revision = ""
 	}
 	_, err = s.commitChangedTo(ctx, s.publicRepo, files, "chore: publish public rules mirror", revision,
-		"rules/upstream/", "rules/personal/", "openclash/", "metadata/")
+		"rules/upstream/", "rules/personal/", "openclash/", "clash/", "metadata/")
 	return err
 }
 
@@ -1088,6 +1206,116 @@ func (s *Service) SelfCheck(ctx context.Context) SelfCheckReport {
 	} else {
 		add("ok", "覆写 YAML 可以解析")
 	}
+	for _, item := range []struct {
+		path   string
+		action rules.Action
+		label  string
+	}{
+		{path: "rules/personal/My_Direct_Classical.yaml", action: rules.Direct, label: "直连 Classical YAML"},
+		{path: "rules/personal/My_Proxy_Classical.yaml", action: rules.Proxy, label: "代理 Classical YAML"},
+	} {
+		providerBytes, _, providerErr := publicRepo.GetFileAtRevision(ctx, item.path, publicRevision)
+		if providerErr != nil || len(providerBytes) == 0 {
+			if providerErr == nil {
+				providerErr = errors.New("文件不存在")
+			}
+			add("fail", "读取 "+item.label+" 失败："+providerErr.Error())
+			continue
+		}
+		expectedProvider := rules.RenderClassical(store, item.action)
+		if string(providerBytes) != string(expectedProvider) {
+			add("fail", item.label+" 与个人规则不一致")
+		} else {
+			add("ok", item.label+" 与个人规则一致")
+		}
+		var providerDocument map[string]any
+		if err := yaml.Unmarshal(providerBytes, &providerDocument); err != nil {
+			add("fail", item.label+" YAML 无法解析："+err.Error())
+			continue
+		}
+		payload, ok := providerDocument["payload"].([]any)
+		if !ok {
+			add("fail", item.label+" 缺少 payload 数组")
+			continue
+		}
+		expectedCount := 0
+		for _, rule := range store.Rules {
+			if rule.Action == item.action {
+				expectedCount++
+			}
+		}
+		if len(payload) != expectedCount {
+			add("fail", fmt.Sprintf("%s 规则数量不一致：%d/%d", item.label, len(payload), expectedCount))
+		} else {
+			add("ok", fmt.Sprintf("%s payload：%d 条", item.label, len(payload)))
+		}
+	}
+	for _, item := range []struct {
+		path   string
+		action rules.Action
+		label  string
+	}{
+		{path: "rules/acl/Custom_Direct.list", action: rules.Direct, label: "自定义直连 ACL"},
+		{path: "rules/acl/Custom_Proxy.list", action: rules.Proxy, label: "自定义代理 ACL"},
+	} {
+		aclBytes, _, aclErr := publicRepo.GetFileAtRevision(ctx, item.path, publicRevision)
+		if aclErr != nil || len(aclBytes) == 0 {
+			if aclErr == nil {
+				aclErr = errors.New("文件不存在")
+			}
+			add("fail", "读取 "+item.label+" 失败："+aclErr.Error())
+			continue
+		}
+		expectedACL := rules.RenderACL(store, item.action)
+		if string(aclBytes) != string(expectedACL) {
+			add("fail", item.label+" 与 personal_rules.json 不一致")
+			continue
+		}
+		expectedCount := 0
+		for _, rule := range store.Rules {
+			if rule.Action == item.action {
+				expectedCount++
+			}
+		}
+		if actual := aclRuleCount(aclBytes); actual != expectedCount {
+			add("fail", fmt.Sprintf("%s 格式或数量不一致：%d/%d", item.label, actual, expectedCount))
+		} else {
+			add("ok", fmt.Sprintf("%s：%d 条", item.label, actual))
+		}
+	}
+	providersBytes, _, providersErr := publicRepo.GetFileAtRevision(ctx, "openclash/providers.yaml", publicRevision)
+	if providersErr != nil || len(providersBytes) == 0 {
+		if providersErr == nil {
+			providersErr = errors.New("文件不存在")
+		}
+		add("fail", "读取 openclash/providers.yaml 失败："+providersErr.Error())
+	} else {
+		var providersDocument map[string]any
+		if err := yaml.Unmarshal(providersBytes, &providersDocument); err != nil {
+			add("fail", "openclash/providers.yaml 无法解析："+err.Error())
+		} else if !strings.Contains(string(providersBytes), s.publishRepo().RawURL("rules/personal/My_Direct_Classical.yaml")) || !strings.Contains(string(providersBytes), s.publishRepo().RawURL("rules/personal/My_Proxy_Classical.yaml")) {
+			add("fail", "openclash/providers.yaml 未引用新的 Classical YAML")
+		} else {
+			add("ok", "openclash/providers.yaml 已引用 Classical YAML")
+		}
+	}
+	aclBytes, _, aclErr := publicRepo.GetFileAtRevision(ctx, "clash/Custom_Mihomo_Optimized.ini", publicRevision)
+	if aclErr != nil || len(aclBytes) == 0 {
+		if aclErr == nil {
+			aclErr = errors.New("文件不存在")
+		}
+		add("fail", "读取 Custom_Mihomo_Optimized.ini 失败："+aclErr.Error())
+	} else if string(aclBytes) != string(s.customMihomoOptimized(store)) {
+		add("fail", "Custom_Mihomo_Optimized.ini 与当前简洁分流模板不一致")
+	} else if strings.Contains(string(aclBytes), "{{PUBLIC_RAW_BASE}}") {
+		add("fail", "Custom_Mihomo_Optimized.ini 存在未替换的公共 Raw 地址占位符")
+	} else if !strings.Contains(string(aclBytes), s.publishRepo().RawURL("rules/acl/Custom_Direct.list")) || !strings.Contains(string(aclBytes), s.publishRepo().RawURL("rules/acl/Custom_Proxy.list")) {
+		add("fail", "Custom_Mihomo_Optimized.ini 未标注当前自定义 ACL 地址")
+	} else if !strings.Contains(string(aclBytes), s.personalACLRulesets(store)) {
+		add("fail", "Custom_Mihomo_Optimized.ini 未按全局精确度内联个人规则")
+	} else {
+		add("ok", "Custom_Mihomo_Optimized.ini 已按精确度发布个人规则：AI 默认美国、YouTube/国际媒体默认香港")
+	}
 	seen := map[string]rules.Action{}
 	duplicates := 0
 	invalid := 0
@@ -1145,11 +1373,7 @@ func (s *Service) desiredFiles(ctx context.Context, store *rules.Store, encoded 
 	if store == nil {
 		st, err := s.LoadStore(ctx)
 		if err != nil {
-			if strings.Contains(err.Error(), "404") {
-				st = rules.Empty()
-			} else {
-				return nil, err
-			}
+			return nil, err
 		}
 		store = &st
 	}
@@ -1160,16 +1384,57 @@ func (s *Service) desiredFiles(ctx context.Context, store *rules.Store, encoded 
 			return nil, err
 		}
 	}
-	direct := rules.Render(*store, rules.Direct, s.cfg.ProxyPolicyGroup)
-	proxy := rules.Render(*store, rules.Proxy, s.cfg.ProxyPolicyGroup)
-	files := map[string][]byte{personalPath: append(encoded, '\n'), "rules/personal/My_Direct_Domain.yaml": direct, "rules/personal/My_Proxy_Domain.yaml": proxy, "README.md": []byte(s.readme()), "LICENSE-THIRD-PARTY.md": []byte(thirdPartyLicense()), "openclash/providers.yaml": []byte(s.providers(upstream)), "openclash/rules-order.yaml": []byte(s.ruleOrder(upstream)), "openclash/personal-overwrite.ini": []byte(s.personalOverwrite(*store))}
+	direct := rules.RenderClassical(*store, rules.Direct)
+	proxy := rules.RenderClassical(*store, rules.Proxy)
+	directACL := rules.RenderACL(*store, rules.Direct)
+	proxyACL := rules.RenderACL(*store, rules.Proxy)
+	files := map[string][]byte{
+		personalPath: append(encoded, '\n'),
+		// Keep the historical Domain filenames so existing consumers do not break.
+		"rules/personal/My_Direct_Domain.yaml":    direct,
+		"rules/personal/My_Proxy_Domain.yaml":     proxy,
+		"rules/personal/My_Direct_Classical.yaml": direct,
+		"rules/personal/My_Proxy_Classical.yaml":  proxy,
+		"rules/acl/Custom_Direct.list":            directACL,
+		"rules/acl/Custom_Proxy.list":             proxyACL,
+		"README.md":                               []byte(s.readme()),
+		"LICENSE-THIRD-PARTY.md":                  []byte(thirdPartyLicense()),
+		"openclash/providers.yaml":                []byte(s.providers(upstream)),
+		"openclash/rules-order.yaml":              []byte(s.ruleOrder(*store, upstream)),
+		"openclash/personal-overwrite.ini":        []byte(s.personalOverwrite(*store)),
+		"openclash/openclash_custom_overwrite.sh": append([]byte(nil), openClashCustomOverwrite...),
+		"clash/Custom_Mihomo_Optimized.ini":       s.customMihomoOptimized(*store),
+	}
 	if s.cfg.SyncUpstream {
-		files["openclash/overwrite.ini"] = []byte(s.overwrite(upstream))
+		files["openclash/overwrite.ini"] = []byte(s.overwrite(*store, upstream))
 	}
 	for name, b := range upstream {
 		files["rules/upstream/"+name] = b
 	}
 	return files, nil
+}
+
+func (s *Service) customMihomoOptimized(store rules.Store) []byte {
+	rawBase := strings.TrimRight(s.publishRepo().RawURL(""), "/")
+	return []byte(strings.NewReplacer(
+		"{{PUBLIC_RAW_BASE}}", rawBase,
+		"{{PERSONAL_ACL_RULESETS}}", s.personalACLRulesets(store),
+	).Replace(string(customMihomoOptimizedTemplate)))
+}
+
+func (s *Service) personalACLRulesets(store rules.Store) string {
+	var b strings.Builder
+	for _, rule := range rules.Ordered(store.Rules) {
+		group := "🚀 手动选择"
+		if rule.Action == rules.Direct {
+			group = "🎯 全球直连"
+		}
+		fmt.Fprintf(&b, "ruleset=%s,[]%s\n", group, rules.Token(rule))
+	}
+	if b.Len() == 0 {
+		return "; 当前没有个人 ACL 规则\n"
+	}
+	return b.String()
 }
 
 func (s *Service) commitChanged(ctx context.Context, files map[string][]byte, msg, expectedRevision string) (string, error) {
@@ -1228,11 +1493,11 @@ func (s *Service) commitChangedTo(ctx context.Context, repo repository.Repositor
 	return repo.CommitFiles(ctx, legacy, msg, expectedRevision)
 }
 func (s *Service) readme() string {
-	return fmt.Sprintf("# ClashRulePilot Rules\n\n个人 OpenClash/Mihomo 规则库，由 ClashRulePilot 维护。代理策略组默认为 `%s`。\n\n上游：[%s](https://github.com/%s)\n\nOpenClash 推荐使用 `openclash/personal-overwrite.ini`。该文件将个人规则以显式 `+rules` 写入，并按精确度排序，使更具体的子域名例外优先。\n\n项目源码不包含在本规则仓库中，本仓库只发布规则文件。\n", s.cfg.ProxyPolicyGroup, s.cfg.UpstreamRepo, s.cfg.UpstreamRepo)
+	return fmt.Sprintf("# Clash大全库（Clash Daquan Rules）\n\n个人 OpenClash/Mihomo 规则库，由 ClashRulePilot 维护。代理策略组默认为 `%s`。\n\n上游：[%s](https://github.com/%s)\n\n## 接入方式\n\n- OpenClash：使用 `openclash/personal-overwrite.ini` 远程覆写，保持个人规则在订阅规则之前。\n- Sublink Pro/Subconverter：推荐使用 `clash/Custom_Mihomo_Optimized.ini`；个人直连与代理规则会按全局精确度内联，父子域名例外不会因分组拆分而失效。\n- 标准纯文本 ACL：`rules/acl/Custom_Direct.list`、`rules/acl/Custom_Proxy.list`。\n- Classical Provider：`rules/personal/My_Direct_Classical.yaml`、`rules/personal/My_Proxy_Classical.yaml`。它们为兼容入口；存在跨动作父子规则时应使用上述优化 ACL 或显式规则。\n- 策略组清理：将 `openclash/openclash_custom_overwrite.sh` 安装到路由器 `/etc/openclash/custom/`，可让“🚀 手动选择”只保留节点组。\n\n项目源码不包含在本规则仓库中，本仓库只发布规则文件。\n", s.cfg.ProxyPolicyGroup, s.cfg.UpstreamRepo, s.cfg.UpstreamRepo)
 }
 func (s *Service) providers(upstream map[string][]byte) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "rule-providers:\n  my_proxy:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    interval: 86400\n  my_direct:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    interval: 86400\n", s.publishRepo().RawURL("rules/personal/My_Proxy_Domain.yaml"), s.publishRepo().RawURL("rules/personal/My_Direct_Domain.yaml"))
+	fmt.Fprintf(&b, "rule-providers:\n  my_proxy:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    interval: 86400\n  my_direct:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    interval: 86400\n", s.publishRepo().RawURL("rules/personal/My_Proxy_Classical.yaml"), s.publishRepo().RawURL("rules/personal/My_Direct_Classical.yaml"))
 	names := sortedNames(upstream)
 	for _, name := range names {
 		provider := providerName(name)
@@ -1240,9 +1505,16 @@ func (s *Service) providers(upstream map[string][]byte) string {
 	}
 	return b.String()
 }
-func (s *Service) ruleOrder(upstream map[string][]byte) string {
+func (s *Service) ruleOrder(store rules.Store, upstream map[string][]byte) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "rules:\n  - RULE-SET,my_proxy,%s\n  - RULE-SET,my_direct,DIRECT\n", s.cfg.ProxyPolicyGroup)
+	b.WriteString("rules:\n")
+	for _, rule := range rules.Ordered(store.Rules) {
+		action := s.cfg.ProxyPolicyGroup
+		if rule.Action == rules.Direct {
+			action = "DIRECT"
+		}
+		fmt.Fprintf(&b, "  - '%s'\n", strings.ReplaceAll(rules.Token(rule)+","+action, "'", "''"))
+	}
 	for _, name := range sortedNames(upstream) {
 		if strings.HasPrefix(name, "Custom_Direct_") {
 			fmt.Fprintf(&b, "  - RULE-SET,%s,DIRECT\n", providerName(name))
@@ -1253,14 +1525,29 @@ func (s *Service) ruleOrder(upstream map[string][]byte) string {
 	return b.String()
 }
 
-func (s *Service) overwrite(upstream map[string][]byte) string {
+func (s *Service) overwrite(store rules.Store, upstream map[string][]byte) string {
 	providers := s.providers(upstream)
-	order := strings.Replace(s.ruleOrder(upstream), "rules:\n", "+rules:\n", 1)
+	order := strings.Replace(s.ruleOrder(store, upstream), "rules:\n", "+rules:\n", 1)
 	return "[YAML]\n" + providers + "\n" + order
 }
 
 func (s *Service) personalOverwrite(store rules.Store) string {
 	return "[YAML]\n" + string(rules.RenderExplicit(store, s.cfg.ProxyPolicyGroup))
+}
+
+func aclRuleCount(data []byte) int {
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if !strings.HasPrefix(line, "DOMAIN,") && !strings.HasPrefix(line, "DOMAIN-SUFFIX,") && !strings.HasPrefix(line, "DOMAIN-KEYWORD,") && !strings.HasPrefix(line, "DOMAIN-WILDCARD,") && !strings.HasPrefix(line, "DOMAIN-REGEX,") {
+			return -1
+		}
+		count++
+	}
+	return count
 }
 
 func sortedNames(m map[string][]byte) []string {

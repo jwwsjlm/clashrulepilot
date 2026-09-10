@@ -51,7 +51,9 @@ GITLAB_BASE_URL=https://gitlab.example.com
 GITLAB_TOKEN=新的Token
 ```
 
-## 私有源与公共镜像
+## Clash大全库：私有源与公共镜像
+
+规则库显示名称使用 **Clash大全库**。当前 GitLab 项目继续使用 `someme/clashrulepilot-rules-private`（私有权威源）和 `someme/clashrulepilot-rules`（公开镜像），避免现有 OpenClash Raw 地址失效。
 
 生产部署建议使用以下配置：
 
@@ -148,6 +150,8 @@ Bot 默认只展示安全的 `DOMAIN` 和两种 `DOMAIN-SUFFIX` 范围，高级�
 ## OpenClash 接入
 
 公开规则仓库创建后，在 **服务 → OpenClash → 配置订阅 → 编辑当前订阅 → 远程覆写** 中订阅 `openclash/personal-overwrite.ini` 的 Raw 地址，类型选择远程/HTTP，目标配置选择“所有配置文件”。Bot 的 **运行状态 → OpenClash 覆写自检** 可验证仓库文件、Raw 地址、`[YAML]`、`+rules`、规则数量和排序是否一致。
+
+需要通过 Sublink Pro/Subconverter 生成标准 Mihomo 配置时，可使用公共仓库中的 `clash/Custom_Mihomo_Optimized.ini`。该模板保持个人 ACL 最高优先级，并复用 Aethersailor 的自定义直连、代理、游戏下载和端口规则；业务分组只保留 AI、YouTube、国际媒体、国外服务和游戏平台。默认出口为：AI 使用美国、YouTube/国际媒体/普通国外服务使用香港、游戏平台使用直连。`⚡ URLTest` 会对全部节点测速并自动选取低延迟节点，测速间隔为 600 秒；`♻️ 自动选择` 保留为它的兼容别名。
 
 该文件通过 `[YAML]` 的显式 `+rules` 把每条个人规则插入订阅规则之前，并按“精确规则、深层后缀、浅层后缀、通配符、关键词、正则”排序。这样相反动作的精确子域名可以作为主域名规则的例外。OpenClash 中原有 Aethersailor 覆写无需删除。
 

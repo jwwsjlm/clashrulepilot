@@ -237,7 +237,13 @@ func (c *Client) CommitChanges(ctx context.Context, changes map[string]repositor
 	}
 	actions := make([]*gl.CommitActionOptions, 0, len(changes))
 	for file, change := range changes {
-		_, lastCommit, err := c.GetFile(ctx, file)
+		var lastCommit string
+		var err error
+		if expectedRevision != "" {
+			_, lastCommit, err = c.GetFileAtRevision(ctx, file, expectedRevision)
+		} else {
+			_, lastCommit, err = c.GetFile(ctx, file)
+		}
 		if err != nil {
 			return "", err
 		}

@@ -1,7 +1,9 @@
 package bot
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +92,9 @@ func TestHelpIncludesPersonalRuleTutorial(t *testing.T) {
 		"config=all",
 		"点击模块刷新后，重启 OpenClash",
 		"+rules",
+		"My_Direct_Classical.yaml",
+		"behavior=classical",
+		"Provider 文件是标准 YAML",
 		"系统 → 软件包",
 		"服务 → OpenClash → 插件设置 → 调试日志 → 生成",
 	} {
@@ -488,6 +493,21 @@ func TestProxySuggestionButtonIsMarkedRecommended(t *testing.T) {
 	}
 }
 
+func TestQueryActionButtonsKeepBothChoices(t *testing.T) {
+	buttons := queryActionButtons(suggestionDecision{ButtonAction: rules.Proxy}, false, false)
+	if len(buttons) != 2 || buttons[0].Data != "suggest:direct" || buttons[1].Data != "suggest:proxy" {
+		t.Fatalf("query must offer both routing actions: %#v", buttons)
+	}
+	if strings.Contains(buttons[0].Text, "推荐") || !strings.Contains(buttons[1].Text, "⭐ 推荐") {
+		t.Fatalf("only the suggested action should be marked recommended: %#v", buttons)
+	}
+
+	buttons = queryActionButtons(suggestionDecision{ButtonAction: rules.Direct}, false, true)
+	if buttons[0].Text != "🟢 覆写为个人直连 · ⭐ 推荐" || buttons[1].Text != "🔴 添加为代理" {
+		t.Fatalf("upstream conflict labels are incorrect: %#v", buttons)
+	}
+}
+
 func TestTypedQueryStartsFreshResponseMessage(t *testing.T) {
 	p := &pending{Mode: "query", ActiveMessageID: 1234}
 	target := queryMessageTarget(p, nil)
@@ -500,14 +520,51 @@ func TestTypedQueryStartsFreshResponseMessage(t *testing.T) {
 	}
 }
 
-func TestSmartSuggestionKeepsMatchingPersonalRuleWithoutButton(t *testing.T) {
+func TestSmartSuggestionKeepsMatchingPersonalRuleWithOptionalSwitch(t *testing.T) {
 	decision := smartSuggestion([]rules.Rule{{Domain: "example.com", Match: rules.Exact, Action: rules.Direct}}, lookup.Report{
 		ChinaChecked: 1,
 		China:        true,
 		GeoIPs:       []lookup.GeoIPInfo{{IP: "1.2.3.4", CountryCode: "CN", China: true}},
 	})
-	if decision.ButtonAction != "" || !strings.Contains(decision.Text, "无需重复添加") {
-		t.Fatalf("matching personal rule should be kept without duplicate action: %+v", decision)
+	if decision.ButtonAction != rules.Proxy || decision.ButtonText != "🔴 切换为代理（不建议）" || !strings.Contains(decision.Text, "无需重复添加") {
+		t.Fatalf("matching personal rule should keep the opposite choice available: %+v", decision)
+	}
+}
+
+func TestGetMeWithRetryRecoversFromTransientFailure(t *testing.T) {
+	calls := 0
+	me, err := getMeWithRetry(context.Background(), 3, time.Millisecond, func(context.Context) (*models.User, error) {
+		calls++
+		if calls < 3 {
+			return nil, errors.New("temporary telegram failure")
+		}
+		return &models.User{Username: "clashrulepilot"}, nil
+	})
+	if err != nil || me == nil || me.Username != "clashrulepilot" || calls != 3 {
+		t.Fatalf("retry did not recover: me=%+v calls=%d err=%v", me, calls, err)
+	}
+}
+
+func TestGetMeWithRetryStopsWhenContextIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	_, err := getMeWithRetry(ctx, 5, time.Second, func(context.Context) (*models.User, error) {
+		calls++
+		cancel()
+		return nil, errors.New("offline")
+	})
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("canceled retry continued: calls=%d err=%v", calls, err)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	calls = 0
+	_, err = getMeWithRetry(ctx, 5, time.Second, func(context.Context) (*models.User, error) {
+		calls++
+		return nil, errors.New("should not run")
+	})
+	if !errors.Is(err, context.Canceled) || calls != 0 {
+		t.Fatalf("pre-canceled context was not honored immediately: calls=%d err=%v", calls, err)
 	}
 }
 

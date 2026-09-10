@@ -3,6 +3,8 @@ package rules
 import (
 	"strings"
 	"testing"
+
+	"github.com/goccy/go-yaml"
 )
 
 func TestRender(t *testing.T) {
@@ -10,6 +12,67 @@ func TestRender(t *testing.T) {
 	out := string(Render(s, Proxy, "🚀 手动选择"))
 	if !contains(out, "DOMAIN-SUFFIX,example.com") {
 		t.Fatal(out)
+	}
+}
+
+func TestRenderClassicalIncludesAllModernDomainTypes(t *testing.T) {
+	s := Store{Version: 1, Rules: []Rule{
+		{Domain: "api.example.com", Match: Exact, Action: Proxy},
+		{Domain: "example.com", Match: Suffix, Action: Proxy},
+		{Domain: "example", Match: Keyword, Action: Proxy},
+		{Domain: "*.example.net", Match: Wildcard, Action: Proxy},
+		{Domain: `^api[0-9]+\.example\.org$`, Match: Regex, Action: Proxy},
+		{Domain: "direct.example", Match: Suffix, Action: Direct},
+	}}
+	out := RenderClassical(s, Proxy)
+	for _, want := range []string{
+		"DOMAIN,api.example.com",
+		"DOMAIN-SUFFIX,example.com",
+		"DOMAIN-KEYWORD,example",
+		"DOMAIN-WILDCARD,*.example.net",
+		`DOMAIN-REGEX,^api[0-9]+\.example\.org$`,
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("classical provider missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(string(out), "direct.example") {
+		t.Fatalf("provider contains rule from another action:\n%s", out)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(out, &document); err != nil {
+		t.Fatalf("classical provider is not YAML: %v\n%s", err, out)
+	}
+	if payload, ok := document["payload"].([]any); !ok || len(payload) != 5 {
+		t.Fatalf("unexpected payload: %#v", document["payload"])
+	}
+}
+
+func TestRenderClassicalEmptyPayloadIsArray(t *testing.T) {
+	out := RenderClassical(Empty(), Direct)
+	var document map[string]any
+	if err := yaml.Unmarshal(out, &document); err != nil {
+		t.Fatalf("empty provider is not YAML: %v\n%s", err, out)
+	}
+	if payload, ok := document["payload"].([]any); !ok || len(payload) != 0 {
+		t.Fatalf("empty provider payload must be an array: %#v", document["payload"])
+	}
+}
+
+func TestRenderACLIsPlainTextAndActionScoped(t *testing.T) {
+	store := Store{Version: 1, Rules: []Rule{
+		{Domain: "api.example.com", Match: Exact, Action: Direct},
+		{Domain: "example.com", Match: Suffix, Action: Direct},
+		{Domain: "proxy.example", Match: Suffix, Action: Proxy},
+	}}
+	out := string(RenderACL(store, Direct))
+	if strings.Contains(out, "payload:") || strings.Contains(out, "proxy.example") {
+		t.Fatalf("ACL must be plain text and action-scoped:\n%s", out)
+	}
+	exact := strings.Index(out, "DOMAIN,api.example.com")
+	suffix := strings.Index(out, "DOMAIN-SUFFIX,example.com")
+	if exact < 0 || suffix < 0 || exact > suffix {
+		t.Fatalf("ACL precedence is incorrect:\n%s", out)
 	}
 }
 

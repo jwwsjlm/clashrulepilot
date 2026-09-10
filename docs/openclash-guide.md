@@ -45,7 +45,7 @@ ClashRulePilot 生成的 `personal-overwrite.ini` 使用 `[YAML]` 和 `+rules` �
 
 ## OpenClash 覆写自检边界
 
-生产环境的推荐分层是：GitHub `jwwsjlm/clashrulepilot` 仅保存源码；GitLab 私有项目 `someme/clashrulepilot-rules-private` 保存个人规则权威源；GitLab 公共项目 `someme/clashrulepilot-rules` 发布 OpenClash 文件。远程覆写使用公共项目地址：
+生产环境的推荐分层是：GitHub `jwwsjlm/clashrulepilot` 仅保存源码；GitLab 私有项目 `someme/clashrulepilot-rules-private` 保存个人规则权威源；GitLab 公共项目 `someme/clashrulepilot-rules` 发布 OpenClash 和 Clash/Mihomo 兼容文件。远程覆写使用公共项目地址：
 
 ```text
 https://gitlab.com/someme/clashrulepilot-rules/-/raw/main/openclash/personal-overwrite.ini
